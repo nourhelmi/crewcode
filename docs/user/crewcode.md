@@ -12,13 +12,17 @@ Open `CrewCode.app`, add a project, choose **Crew**, select a lead model, and se
 
 The app starts its own local server. Crew, Node 24+, and authenticated Codex/Claude CLIs are separate installations. No browser is required. Native Codex and Claude providers remain available for ordinary conversations; selecting one does not activate this ACP integration.
 
-The lead model, workflow, effort, and native permissions are fixed after launch in the current ACP adapter. Start a new Crew chat to change them. Existing native conversations retain their history, but the old T3-owned Crew worker launcher has been removed.
+Change the lead model or switch between Advisor and Chief of staff in the same chat using the composer controls. Changes apply on the next root turn, once the current turn finishes or is interrupted. The root keeps its native conversation and existing workers keep their assignments. After launch, model choices stay within the root's provider: switch Codex models within a Codex-led chat, or Claude models within a Claude-led chat. Start a new chat to change between Codex and Claude.
+
+Effort follows the selected model's supported values. Native permissions remain fixed after launch. If Crew rejects a configuration change, the next prompt fails visibly instead of running under an unacknowledged choice. Existing native conversations retain their history, but the old T3-owned Crew worker launcher has been removed.
 
 ## Stock T3 or another ACP client
 
 Crew itself needs no fork. In a stock T3 installation, add a **Local ACP command** provider with your installed Crew executable as the command and `acp` as its argument. Use an absolute path such as `/Users/you/.local/bin/crew` if the GUI cannot find it on PATH. `CREW_NODE` can point to a Node 24+ executable.
 
-Standard ACP provides root chat, model/workflow configuration, streamed text/tools, permissions, session history, and MCP configuration. Generic clients receive worker output in the root stream. This fork's small optional Crew metadata adapter maps that output into T3's existing read-only child-chat display. The current child views are listed under the root; nested Crew advisor lineage remains metadata rather than a nested visual tree. Separate native child views are a client feature, not a standard ACP guarantee. No T3 session IDs, credentials, or launcher API belong in the Crew CLI.
+Standard ACP provides root chat, model/workflow configuration, streamed text/tools, permissions, session history, and MCP configuration. Generic clients receive worker output in the root stream. This fork adds two Crew-specific behaviors: it maps worker metadata into T3's existing read-only child-chat display, and it lets Crew supply the delegation workflow without T3 adding competing delegation instructions. T3's other tools remain available; its core orchestrator still runs the app's conversations, events, and permissions.
+
+The current child views are listed under the root; nested Crew advisor lineage remains metadata rather than a nested visual tree. Separate child views are a client feature, not a standard ACP guarantee. Stock T3 can run the Crew root through its Local ACP provider, but it does not recognize Crew's worker metadata or workflow ownership. This fork also reports rejected Crew configuration changes as errors. Its branding, separate profile, startup configuration, and general lifecycle fixes are conveniences rather than requirements of the Crew protocol. No T3 session IDs, credentials, or launcher API belong in the Crew CLI.
 
 ## Permissions, mail, and lifecycle
 

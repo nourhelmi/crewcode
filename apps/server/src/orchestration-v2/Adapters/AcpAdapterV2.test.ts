@@ -605,6 +605,180 @@ function makeTurnInput(input: {
 }
 
 describe("AcpAdapterV2", () => {
+  it.live.each(["none", "mode", "effort"] as const)(
+    "switches Crew model/workflow in one session without hiding a %s rejection",
+    (rejectedOption) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-crew-acp-config-" });
+        const scriptPath = path.join(directory, "agent.mjs");
+        yield* fs.writeFileString(
+          scriptPath,
+          `
+import { createInterface } from 'node:readline';
+const send = value => process.stdout.write(JSON.stringify({jsonrpc:'2.0',...value})+'\\n');
+const result = (id,result) => send({id,result});
+const selected = {model:'codex/sol',mode:'advisor',effort:'high'};
+const choices = {model:['codex/sol','codex/luna'],mode:['advisor','cos'],effort:['high','max']};
+const config = () => Object.entries(choices).map(([id,values]) => ({id,name:id,type:'select',category:id==='effort'?'thought_level':id,currentValue:selected[id],options:values.map(value=>({value,name:value}))}));
+let rejected = false;
+createInterface({input:process.stdin}).on('line',line => {
+ const message=JSON.parse(line);
+ if(message.method==='initialize') return result(message.id,{protocolVersion:1,agentInfo:{name:'crew',version:'1'},agentCapabilities:{_meta:{crew:{version:1}}},authMethods:[]});
+ if(message.method==='session/new') return result(message.id,{sessionId:'config-root',configOptions:config()});
+ if(message.method==='session/set_config_option') {
+  const {configId,value}=message.params;
+  if(!rejected && configId===process.env.REJECT_OPTION) {
+   rejected=true;
+   return send({id:message.id,error:{code:-32602,message:'Requested Crew '+configId+' was rejected'}});
+  }
+  selected[configId]=value;
+  return result(message.id,{configOptions:config()});
+ }
+ if(message.method==='session/prompt') {
+  send({method:'session/update',params:{sessionId:'config-root',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:JSON.stringify(selected)}}}});
+  return result(message.id,{stopReason:'end_turn'});
+ }
+ if(message.method==='session/close') return result(message.id,{});
+});
+`,
+        );
+        const routing = makeCrewAcpRouting();
+        const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
+        const instanceId = ProviderInstanceId.make(`crew-config-${rejectedOption}`);
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          selfInvocation: yield* resolveSelfInvocation(),
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            ...routing,
+            makeRuntime: makeMockRuntime({
+              childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+              mockAgentPath: scriptPath,
+              protocolEvents,
+              environment: { REJECT_OPTION: rejectedOption },
+            }),
+          },
+        });
+        const threadId = ThreadId.make(`crew-config-${rejectedOption}`);
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: directory,
+        });
+        const advisor = {
+          instanceId,
+          model: "codex/sol",
+          options: [
+            { id: "mode", value: "advisor" },
+            { id: "effort", value: "high" },
+          ],
+        } satisfies ModelSelection;
+        const cos = {
+          instanceId,
+          model: "codex/luna",
+          options: [
+            { id: "mode", value: "cos" },
+            { id: "effort", value: "max" },
+          ],
+        } satisfies ModelSelection;
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make(`crew-config-session-${rejectedOption}`),
+          modelSelection: advisor,
+          runtimePolicy,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: advisor,
+          runtimePolicy,
+        });
+        const now = yield* DateTime.now;
+        const input = (ordinal: number, modelSelection: ModelSelection) =>
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now,
+            ordinal,
+            modelSelection,
+          });
+        const run = (ordinal: number, selection: ModelSelection) =>
+          Effect.gen(function* () {
+            yield* runtime.startTurn(input(ordinal, selection));
+            const events = yield* runtime.events.pipe(
+              Stream.takeUntil((event) => event.type === "turn.terminal"),
+              Stream.runCollect,
+            );
+            const finalText = events
+              .flatMap((event) => (event.type === "message.updated" ? [event.message.text] : []))
+              .at(-1);
+            assert.equal(
+              finalText,
+              JSON.stringify({
+                model: selection.model,
+                mode: selection.options?.find((option) => option.id === "mode")?.value,
+                effort: selection.options?.find((option) => option.id === "effort")?.value,
+              }),
+            );
+          });
+        yield* run(1, advisor);
+        if (rejectedOption !== "none") {
+          yield* Queue.clear(protocolEvents);
+          const failed = yield* Effect.exit(runtime.startTurn(input(2, cos)));
+          assert.isTrue(
+            Exit.isFailure(failed),
+            "the rejected choice must fail before the next prompt",
+          );
+          if (Exit.isFailure(failed)) {
+            assert.include(
+              Cause.pretty(failed.cause),
+              `Requested Crew ${rejectedOption} was rejected`,
+            );
+          }
+          assert.notInclude(yield* pollProtocolMethods(protocolEvents), "session/prompt");
+        }
+        yield* run(3, cos);
+        yield* run(4, advisor);
+        const outgoing = Array.from(yield* Queue.takeAll(protocolEvents)).filter(
+          (event) => event.direction === "outgoing",
+        );
+        assert.notInclude(outgoing.map(rawProtocolMethod), "session/load");
+        assert.isTrue(
+          outgoing
+            .filter((event) => rawProtocolMethod(event) === "session/prompt")
+            .every((event) => rawProtocolRequestParam(event, "sessionId") === "config-root"),
+        );
+        if (rejectedOption === "none") {
+          assert.lengthOf(
+            outgoing.filter((event) => rawProtocolMethod(event) === "session/new"),
+            1,
+          );
+          for (const invalid of [
+            { id: "mode", value: "removed-workflow" },
+            { id: "removed-option", value: "high" },
+          ]) {
+            const failed = yield* Effect.exit(
+              runtime.startTurn(
+                input(5, {
+                  ...advisor,
+                  options: [invalid],
+                }),
+              ),
+            );
+            assert.isTrue(
+              Exit.isFailure(failed),
+              "an unavailable explicit choice must not be ignored",
+            );
+            assert.notInclude(yield* pollProtocolMethods(protocolEvents), "session/prompt");
+          }
+        }
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it.effect.each(["accept", "decline"] as const)(
     "correlates Crew worker %s and question replies on the root ACP session",
     (decision) =>

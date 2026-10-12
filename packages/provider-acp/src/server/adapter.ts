@@ -6340,6 +6340,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             });
           }
           const optionSelections = modelSelection.options ?? [];
+          // A workflow-owning agent treats these as explicit session choices,
+          // not advisory tuning hints. Never send under a rejected workflow.
+          const strictConfig = flavor.ownsWorkflow?.() === true;
           const configOptions = yield* runtime.getConfigOptions;
           const availableConfigIds = new Set(configOptions.map((option) => option.id));
           const hasNativeConfigWithSyntheticModeId = availableConfigIds.has(
@@ -6361,6 +6364,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             .map((selection) => selection.id)
             .filter((id) => !availableConfigIds.has(id));
           if (unsupportedConfigIds.length > 0) {
+            if (strictConfig) {
+              return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                driver,
+                detail: `ACP session does not expose requested configuration option(s): ${unsupportedConfigIds.join(", ")}`,
+              });
+            }
             yield* Effect.logWarning(
               "ACP session does not expose requested configuration option(s)",
               {
@@ -6388,18 +6397,29 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               const advertisedValues = option.options.flatMap((entry) =>
                 "value" in entry ? [entry.value] : entry.options.map((choice) => choice.value),
               );
-              if (!advertisedValues.includes(selection.value)) continue;
+              if (!advertisedValues.includes(selection.value)) {
+                if (strictConfig) {
+                  return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver,
+                    detail: `ACP session does not offer the requested value for configuration option ${selection.id}`,
+                  });
+                }
+                continue;
+              }
             }
-            yield* runtime.setConfigOption(selection.id, selection.value).pipe(
-              Effect.catchTags({
-                AcpRequestError: (error) =>
-                  Effect.logWarning("ACP session rejected a configuration option value", {
-                    optionId: selection.id,
-                    value: selection.value,
-                    detail: error.message,
+            const setOption = runtime.setConfigOption(selection.id, selection.value);
+            yield* strictConfig
+              ? setOption
+              : setOption.pipe(
+                  Effect.catchTags({
+                    AcpRequestError: (error) =>
+                      Effect.logWarning("ACP session rejected a configuration option value", {
+                        optionId: selection.id,
+                        value: selection.value,
+                        detail: error.message,
+                      }),
                   }),
-              }),
-            );
+                );
           }
           const policyMode = flavor.sessionModeForPolicy?.(runtimePolicy);
           if (policyMode !== undefined) {
