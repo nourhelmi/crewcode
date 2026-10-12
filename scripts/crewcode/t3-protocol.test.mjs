@@ -72,6 +72,20 @@ it.layer(NodeServices.layer)("CrewCode ACP integration", (it) => {
           prompt: [{ type: "text", text: "Second request" }],
         });
         NodeAssert.equal(followup.stopReason, "end_turn");
+        const runDirectories = yield* Effect.promise(() =>
+          NodeFSP.readdir(NodePath.join(home, "crew-state", "runs")),
+        );
+        NodeAssert.equal(runDirectories.length, 1, "follow-up must reuse its retained advisor");
+        const retained = yield* Effect.promise(async () =>
+          JSON.parse(
+            await NodeFSP.readFile(
+              NodePath.join(home, "crew-state", "runs", runDirectories[0], "meta.json"),
+              "utf8",
+            ),
+          ),
+        );
+        NodeAssert.equal(retained.amendment.number, 1);
+        NodeAssert.equal(retained.state, "idle");
         NodeAssert.ok(updates.some((event) => event.update.sessionUpdate === "tool_call"));
         const messages = updates.filter(
           (event) => event.update.sessionUpdate === "agent_message_chunk",

@@ -205,7 +205,11 @@ export class CrewAcpAgent {
       const packet = `${text}\n\nCrewCode turn ID: ${requestId}. Include this ID in your result Evidence so this turn settles independently.\nLead this work using your Crew advisor workflow, route and delegate through crew, and settle your children before reporting.\nYour host's own sandbox and approval rules apply. Do not assume this ACP client grants additional permissions.\n`;
       session.history.push({ role: "user", text });
       await this.save(session);
-      if (run && run.state === "running" && (run.sessionId || run.launcher === "herdr")) {
+      if (
+        run &&
+        ["running", "idle"].includes(run.state) &&
+        (run.sessionId || run.launcher === "herdr")
+      ) {
         await client.amend(run.id, packet);
       } else {
         // A stopped run cannot resume; an installation without hooks cannot learn
@@ -266,6 +270,10 @@ export class CrewAcpAgent {
           run.settled.hash !== run.amendment?.resultHash &&
           run.settled.hash === resultHash(result)
         ) {
+          if (/^(FAIL|BLOCKED)/i.test(run.settled.status)) {
+            const state = /^BLOCKED/i.test(run.settled.status) ? "blocked" : "failed";
+            throw new Error(`Crew advisor ${state}. ${result}`);
+          }
           this.text(session.id, result);
           session.history.push({ role: "agent", text: result });
           await this.save(session);

@@ -56,9 +56,11 @@ async function fixture(t, behavior = {}) {
           settle(packet) {
             this.output = `# Status\nDONE\n# Evidence\n${packet.match(/CrewCode turn ID: (.*)\./)?.[1] || "result"}`;
             this.entries.at(-1).settled = { hash: resultHash(this.output), status: "DONE" };
+            this.entries.at(-1).state = "idle";
           },
           async amend(id, packet) {
             this.amendCount++;
+            this.entries.at(-1).state = "running";
             this.entries.at(-1).amendment = {
               number: this.amendCount,
               resultHash: this.entries.at(-1).settled.hash,
@@ -107,7 +109,7 @@ NodeTest.default(
     NodeAssert.equal(client.spawnCount, 1);
     NodeAssert.equal(client.amendCount, 1);
     NodeAssert.notEqual(client.output, first);
-    NodeAssert.equal(client.entries[0].state, "running");
+    NodeAssert.equal(client.entries[0].state, "idle");
   },
 );
 
@@ -188,6 +190,25 @@ NodeTest.default(
     NodeAssert.equal(f.clients.get(f.sessionId).entries[0].state, "stopped");
   },
 );
+
+for (const status of ["FAIL", "BLOCKED"]) {
+  NodeTest.default(`settled ${status} rejects the prompt and stops owned workers`, async (t) => {
+    const f = await fixture(t, { hold: true });
+    const prompt = f.prompt();
+    const rejected = NodeAssert.rejects(prompt, /Crew advisor (failed|blocked)/);
+    await f.launched;
+    const client = f.clients.get(f.sessionId);
+    client.output = `# Status\n${status}\n# Evidence\nUnable to finish`;
+    Object.assign(client.entries[0], {
+      state: status === "FAIL" ? "failed" : "blocked",
+      settled: { hash: resultHash(client.output), status },
+    });
+    client.entries.push({ id: "b-child", state: "running", parent: { mailbox: "a-1" } });
+    await rejected;
+    NodeAssert.ok(client.entries.every((run) => run.state === "stopped"));
+    NodeAssert.equal(f.agent.sessions.get(f.sessionId).runId, undefined);
+  });
+}
 
 NodeTest.default(
   "sessions persist, replay conversation and reject cross-workspace loads",

@@ -8,7 +8,7 @@ const [command, ...args] = process.argv.slice(2);
 if (command === "spawn" && !/^[a-z][a-z0-9_-]{0,31}$/.test(args[args.indexOf("--name") + 1])) {
   throw new Error("Crew run names must be at most 32 characters.");
 }
-const id = command === "spawn" ? "a-fixture" : args[0];
+const id = command === "spawn" ? `a-${NodeCrypto.randomUUID()}` : args[0];
 const directory = NodePath.join(process.env.CREW_HOME, "runs", id);
 const path = NodePath.join(directory, "meta.json");
 if (command === "spawn" || command === "amend") {
@@ -20,7 +20,7 @@ if (command === "spawn" || command === "amend") {
     id,
     name: "fixture",
     role: "advisor",
-    state: "running",
+    state: "idle",
     sessionId: "fixture-native",
     route: { model: "fixture" },
     parent: { mailbox: process.env.CREW_MAILBOX },
