@@ -29,7 +29,9 @@ it.layer(NodeServices.layer)("CrewCode ACP integration", (it) => {
       yield* Effect.promise(() => NodeFSP.chmod(crewBin, 0o700));
       const settings = providerSettings({ home, crewBin });
       const decoded = decodeSettings(settings);
-      NodeAssert.equal(decoded.defaultModelSelection.instanceId, "crew");
+      NodeAssert.equal(decoded.defaultModelSelection, null);
+      NodeAssert.equal(decoded.providerInstances.codex.enabled, true);
+      NodeAssert.equal(decoded.providerInstances.crew.enabled, false);
       NodeAssert.equal(decodeAcpSettings(decoded.providerInstances.crew.config).source, "local");
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const handle = yield* spawner.spawn(

@@ -1,54 +1,63 @@
 # CrewCode
 
-CrewCode brings your Crew into T3 Code's workspace. Every conversation starts a Crew advisor; your Crew roster and router choose its model and the workers it delegates to. Follow-ups amend the same advisor's assignment when its native session can be resumed. Worker activity appears in the conversation, followed by the advisor's result.
+CrewCode keeps T3 Code's native Codex and Claude conversations and adds Crew's delegation workflow. Choose the lead's provider and model first, then invoke Crew's **advisor** or **cos** skill in that conversation. The selected model remains the lead; Crew routes the workers it delegates to.
 
 ## Desktop app
 
-Install `CrewCode.app` in Applications and open it. The app starts its own local server and selects **Crew · automatic routing**. Add a project and start a conversation; no browser or separate server command is required.
+Install `CrewCode.app` in Applications and open it. Add a project, choose Codex or Claude and an available model, then start your conversation. The app starts its own local server; no browser or separate server command is required.
 
-CrewCode bundles its bridge, but Crew and the authenticated host CLIs remain external dependencies. Install [Crew](https://github.com/nourhelmi/crew), its host hooks, and Node 24.13.1 or later in the 24.x line. The app uses your normal Crew roster, routing, and sign-ins.
+Install [Crew](https://github.com/nourhelmi/crew), including its skills and host hooks, and authenticate the native CLIs you want to use. Crew and those CLIs remain separate from the app. Crew requires Node 24.13.1 or later in the 24.x line.
 
 Desktop data lives in `~/.crewcode`, separate from T3 Code and this checkout's web development profile. Local builds do not poll upstream T3 Code releases for updates. Replace the app with a newer CrewCode build to update it.
 
+## Choose the lead and workflow
+
+The model picker chooses the model you talk to. Choose Astra under Codex or Opus under Claude when that model is available in your account. You can also start a normal conversation before asking the same lead to use Crew.
+
+Ask the lead to use the installed **Crew advisor** skill for a workstream, or **Crew cos** for coordinating multiple workstreams through child advisors. For example: “Use the Crew advisor skill to implement this feature.” In Claude, the namespaced skill is `crew:advisor`; `/advisor` alone is a different built-in command.
+
+Advisor and CoS describe how the lead organizes work. They do not choose or replace its model. Your Crew roster and router select delegated workers; an explicit worker model pin overrides routing. `crew roster` shows the configured choices.
+
+Native conversations retain T3's supported model controls, live streaming, tools, approvals, attachments, MCP integration, conversation history, diffs, terminals, and checkpoints. Delegated Crew workers run outside the lead's native session. Their status and results appear as tool activity, and stopping or closing the lead's runtime stops its owned Crew workers. Their full transcripts and approval prompts are not automatically native T3 child conversations; use the lead's Crew reports and `crew ls --all` / `crew read <run-id>` for details.
+
 ## Web development
 
-Install Node 24.13.1 or later in the 24.x line and pnpm 11. Install [Crew](https://github.com/nourhelmi/crew) using its setup instructions, including the hooks for your host CLIs, and sign in to the agents your roster uses. `crew roster` shows your configuration. Crew's default advisor uses Claude; configure Crew's advisor default or roster if you only use Codex.
-
-From this checkout:
+Install Node 24.13.1 or later in the 24.x line and pnpm 11. From this checkout:
 
 ```bash
 pnpm install --frozen-lockfile
 pnpm crewcode --crew /absolute/path/to/crew/bin/crew
 ```
 
-If `crew` is already on PATH, `pnpm crewcode` is sufficient. Open the web address printed by the dev runner. Add a project and start a conversation with **Crew · automatic routing** selected.
+If `crew` is already on PATH, `pnpm crewcode` is sufficient. Open the web address printed by the dev runner and follow the same provider, model, and skill workflow as the desktop app.
 
-CrewCode creates `.crewcode/userdata/settings.json` and selects Crew. Codex and Claude's direct providers start disabled in this new profile; Crew still uses those CLIs through its own routing. Your existing T3 profile is separate. Repeating setup preserves your settings. If you move the checkout or Crew executable, update the Crew provider in **Settings → Providers**, or choose a new profile with `--home /absolute/path`.
+CrewCode creates `.crewcode/userdata/settings.json` with native Codex and Claude providers enabled. T3 selects an available provider and its model default until you make a selection. Repeating setup preserves your settings. Choose a separate profile with `--home /absolute/path`.
 
-For an existing T3 installation, add **Settings → Providers → Add provider → Local ACP command**. Set the executable to your Node 24 binary and its single argument to the absolute path of `scripts/crewcode/acp.mjs` in this checkout. Set `CREWCODE_CREW_BIN` in the provider's environment if Crew is not on PATH. Select the `crew-auto` model.
+An unchanged profile generated by the earlier ACP-only CrewCode version is migrated to enable native providers. Its Crew provider remains available for existing conversations. Profiles with a custom default or customized provider settings are left alone; enable Codex or Claude in **Settings → Providers** to use the native workflow.
 
-## Your Crew settings
+## Optional Crew ACP provider
 
-CrewCode preserves `CREW_HOME`, `CREW_CONFIG`, `CREW_ROSTER`, and `CREW_ROUTER`. Your normal Crew routing, capacity limits, skills, and host sign-ins remain in charge. Configure those in Crew rather than selecting individual models in CrewCode.
+The **Crew** provider is an alternative for conversations whose lead should be selected automatically by Crew. Enable it in **Settings → Providers**, then choose `crew-auto`. It uses a separate Crew advisor and does not change the lead in an existing native Codex or Claude conversation.
 
-The conversation's stop action cancels its advisor and descendants. A subsequent prompt starts a replacement advisor with recent conversation context. Normal follow-ups use the kept advisor. If native resume information is unavailable, CrewCode uses a replacement with recent context instead. Disconnecting the bridge stops its owned runs; reopening a conversation restores its saved messages.
+`crew-auto` lets Crew select the advisor and workers through its roster and router. **Default**, if shown for this provider, also defers selection to the bridge. Neither option selects Advisor versus CoS or pins a particular lead model. Use a native provider when you want to choose the lead yourself.
 
-## Current scope
+The desktop app bundles this optional bridge. For an existing T3 installation, add **Settings → Providers → Add provider → Local ACP command**. Set the executable to your Node 24 binary and its single argument to the absolute path of `scripts/crewcode/acp.mjs` in this checkout. Set `CREWCODE_CREW_BIN` in the provider's environment if Crew is not on PATH. Select the `crew-auto` model.
 
-- Text prompts and embedded text context are supported. Images and audio are rejected explicitly.
-- Worker status and final results are shown. Token streaming and native child-agent cards are not implemented.
-- Host CLIs enforce their own sandbox and approvals. CrewCode does not translate T3's permission picker into host permissions or display host approval dialogs. Complete approval or sign-in steps in the native CLI; cancel from CrewCode if a headless run cannot proceed.
-- MCP servers configured in the native hosts are available to Crew. T3-injected MCP servers and T3 scheduling tools are not forwarded by this bridge.
-- Model-generated thread titles, commit messages, and similar app actions need a separate text-generation provider. They do not run through the Crew bridge.
-- The desktop app and source-run web app are supported. Local desktop builds are unsigned; release signing, mobile branding, and hosted deployment are not included.
+ACP follow-ups reuse the kept advisor when its native session can be resumed. Stop cancels that advisor and its descendants; a subsequent prompt starts a replacement with recent conversation context. Closing the bridge stops its owned runs; reopening the conversation restores saved messages.
 
-T3's conversation persistence and checkpoint machinery remain in place; Crew owns agent execution and delegation. This keeps existing project, diff, terminal, and file-restore behavior available.
+The optional ACP bridge has these limitations, which do not apply to the native lead workflow:
+
+- Text prompts and embedded text context are supported; images and audio are rejected.
+- It shows worker status and final results rather than live model text and native child-agent cards.
+- Host CLIs enforce their own sandbox and approvals. The bridge does not translate T3's permission picker or show host approval dialogs. Complete approval or sign-in steps in the native CLI; cancel from CrewCode if a headless run cannot proceed.
+- MCP servers configured in the native hosts are available to Crew. T3-injected MCP servers and scheduling tools are not forwarded.
+- Model-generated thread titles, commit messages, and similar app actions need a native text-generation provider.
 
 ## Troubleshooting
 
-Run `crew ls --all` and `crew read <run-id>` to inspect a stalled host. Network access and authentication must work for each CLI selected by your Crew roster. The bridge reports launch failures and stalled runs instead of reporting success.
+CrewCode preserves `CREW_HOME`, `CREW_CONFIG`, `CREW_ROSTER`, and `CREW_ROUTER`. Network access and authentication must work for each CLI selected by your Crew roster. Run `crew ls --all` and `crew read <run-id>` to inspect a stalled worker.
 
-Sessions live under `CREWCODE_HOME/sessions`, or `~/.crewcode/sessions` when the bridge is added manually without that variable. Only one bridge can load a session at a time. After a hard process crash, stop any remaining workers and verify no bridge owns the session before removing its `.json.lock` file. Do not remove a lock belonging to a live bridge.
+ACP sessions live under `CREWCODE_HOME/sessions`, or `~/.crewcode/sessions` when the bridge is added manually without that variable. Only one bridge can load a session at a time. After a hard process crash, stop any remaining workers and verify no bridge owns the session before removing its `.json.lock` file. Do not remove a lock belonging to a live bridge.
 
 ## Build the macOS app
 
@@ -58,13 +67,13 @@ With the repository dependencies installed, Xcode Command Line Tools, and Rust a
 pnpm crewcode:build:mac
 ```
 
-This produces an unsigned `CrewCode-<version>-<arch>.zip` in `release/` using the host architecture. Extract it and move `CrewCode.app` to Applications. Add `--arch arm64` or `--arch x64` to choose a supported architecture explicitly. CrewCode uses its own app identity and bundles the Crew bridge, so the installed app does not depend on keeping this source checkout. Keep the separate Crew installation available.
+This produces an unsigned `CrewCode-<version>-<arch>.zip` in `release/` using the host architecture. Extract it and move `CrewCode.app` to Applications. Add `--arch arm64` or `--arch x64` to choose a supported architecture explicitly. CrewCode uses its own app identity and bundles the Crew bridge, so the installed app does not depend on keeping this source checkout. Keep the separate Crew installation available. Release signing, mobile branding, and hosted deployment are not included.
 
 ## Contributor checks
 
 ```bash
 pnpm crewcode:test
-pnpm exec vp test run scripts/crewcode/t3-protocol.test.mjs apps/web/src/branding.test.ts
+pnpm exec vp test run scripts/crewcode/t3-protocol.test.mjs apps/desktop/src/crewCodeBootstrap.test.ts apps/web/src/branding.test.ts
 ```
 
-The protocol integration test uses T3's actual ACP client and a fixture Crew executable in a temporary directory. It verifies the protocol and CLI boundary without model calls. A live model run additionally requires authenticated CLIs and permitted model endpoints.
+The protocol integration test uses T3's actual ACP client and a fixture Crew executable in a temporary directory. It verifies the optional protocol and CLI boundary without model calls. A live model run additionally requires authenticated CLIs and permitted model endpoints.

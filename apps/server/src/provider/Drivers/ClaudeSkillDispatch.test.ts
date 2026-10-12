@@ -19,6 +19,21 @@ describe("planClaudeSkillDispatch", () => {
     });
   });
 
+  it("dispatches plugin-qualified skills without losing their namespace", () => {
+    const pluginSkills = new Set([...SKILLS, "crew:advisor", "crew:cos"]);
+    expect(planClaudeSkillDispatch("$crew:advisor build the feature", pluginSkills)).toEqual({
+      leadingText: undefined,
+      commandText: "/crew:advisor build the feature",
+      skillName: "crew:advisor",
+    });
+    expect(planClaudeSkillDispatch("use $crew:cos for both workstreams", pluginSkills)).toEqual({
+      leadingText: "use",
+      commandText: "/crew:cos for both workstreams",
+      skillName: "crew:cos",
+    });
+    expect(planClaudeSkillDispatch("$other:advisor build it", pluginSkills)).toBeUndefined();
+  });
+
   it("keeps a mention that opens the prompt as a single command block", () => {
     expect(planClaudeSkillDispatch("$review\nfocus on auth", SKILLS)).toEqual({
       leadingText: undefined,

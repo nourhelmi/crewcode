@@ -300,23 +300,56 @@ NodeTest.default(
   },
 );
 
-NodeTest.default("setup selects Crew and preserves subsequent user settings", async (t) => {
-  const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "crewcode-setup-"));
-  t.after(() => NodeFSP.rm(home, { recursive: true, force: true }));
-  const first = await setup({ home, crewBin: "crew" });
-  const before = await NodeFSP.readFile(first.path, "utf8");
-  await setup({ home, crewBin: "crew" });
-  NodeAssert.equal(await NodeFSP.readFile(first.path, "utf8"), before);
-  const edited = JSON.parse(before);
-  edited.providerInstances.crew.displayName = "My Crew";
-  edited.providerInstances.crew.enabled = false;
-  edited.providerInstances.crew.config.customModels = ["crew-auto", "custom"];
-  await NodeFSP.writeFile(first.path, JSON.stringify(edited));
-  await setup({ home });
-  NodeAssert.deepEqual(JSON.parse(await NodeFSP.readFile(first.path, "utf8")), edited);
-  NodeAssert.deepEqual(first.settings.defaultModelSelection, {
-    instanceId: "crew",
-    model: "crew-auto",
-  });
-  await NodeAssert.rejects(setup({ home, crewBin: "different-crew" }), /Existing settings/);
-});
+NodeTest.default(
+  "setup enables native providers and preserves subsequent user settings",
+  async (t) => {
+    const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "crewcode-setup-"));
+    t.after(() => NodeFSP.rm(home, { recursive: true, force: true }));
+    const first = await setup({ home, crewBin: "crew" });
+    const before = await NodeFSP.readFile(first.path, "utf8");
+    await setup({ home, crewBin: "crew" });
+    NodeAssert.equal(await NodeFSP.readFile(first.path, "utf8"), before);
+    const edited = JSON.parse(before);
+    edited.providerInstances.crew.displayName = "My Crew";
+    edited.providerInstances.crew.enabled = false;
+    edited.providerInstances.crew.config.customModels = ["crew-auto", "custom"];
+    await NodeFSP.writeFile(first.path, JSON.stringify(edited));
+    await setup({ home });
+    NodeAssert.deepEqual(JSON.parse(await NodeFSP.readFile(first.path, "utf8")), edited);
+    NodeAssert.equal(first.settings.defaultModelSelection, null);
+    NodeAssert.equal(first.settings.providerInstances.codex.enabled, true);
+    NodeAssert.equal(first.settings.providerInstances.claudeAgent.enabled, true);
+    NodeAssert.equal(first.settings.providerInstances.crew.enabled, false);
+    await setup({ home, crewBin: "different-crew" });
+    NodeAssert.deepEqual(JSON.parse(await NodeFSP.readFile(first.path, "utf8")), edited);
+  },
+);
+
+NodeTest.default(
+  "setup migrates only its generated legacy profile and preserves JSONC",
+  async (t) => {
+    const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "crewcode-setup-migrate-"));
+    t.after(() => NodeFSP.rm(home, { recursive: true, force: true }));
+    const initial = await setup({ home, crewBin: "crew" });
+    const legacy = structuredClone(initial.settings);
+    legacy.defaultModelSelection = { instanceId: "crew", model: "crew-auto" };
+    legacy.providerInstances.codex = { driver: "codex", enabled: false };
+    legacy.providerInstances.claudeAgent = { driver: "claudeAgent", enabled: false };
+    legacy.providerInstances.crew.enabled = true;
+    legacy.custom = { preserve: true };
+    await NodeFSP.writeFile(initial.path, JSON.stringify(legacy));
+    const migrated = await setup({ home, crewBin: "crew" });
+    NodeAssert.equal(migrated.settings.defaultModelSelection, null);
+    NodeAssert.equal(migrated.settings.providerInstances.codex.enabled, true);
+    NodeAssert.equal(migrated.settings.providerInstances.claudeAgent.enabled, true);
+    NodeAssert.deepEqual(migrated.settings.providerInstances.crew, legacy.providerInstances.crew);
+    NodeAssert.deepEqual(migrated.settings.custom, legacy.custom);
+    const before = await NodeFSP.readFile(initial.path, "utf8");
+    await setup({ home, crewBin: "crew" });
+    NodeAssert.equal(await NodeFSP.readFile(initial.path, "utf8"), before);
+    const jsonc = '{\n  // Keep this user comment.\n  "providerInstances": {}\n}\n';
+    await NodeFSP.writeFile(initial.path, jsonc);
+    await setup({ home, crewBin: "crew" });
+    NodeAssert.equal(await NodeFSP.readFile(initial.path, "utf8"), jsonc);
+  },
+);

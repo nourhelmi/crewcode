@@ -1,8 +1,8 @@
 # CrewCode
 
-T3 Code's workspace, powered by [Crew](https://github.com/nourhelmi/crew). Crew routes the advisor and workers across your installed coding agents; the app provides projects, conversations, diffs, terminals, and checkpoints.
+T3 Code's native agent workspace with [Crew](https://github.com/nourhelmi/crew) delegation. Choose Codex or Claude and the lead's model, then invoke Crew's advisor or cos skill in that conversation. Crew routes delegated workers while T3 keeps the lead's streaming, tools, approvals, projects, diffs, terminals, and checkpoints.
 
-Open **CrewCode.app** from Applications, add a project, and start a conversation with **Crew · automatic routing**. The desktop app starts its own local server; no browser or separate server command is required. Crew and its authenticated host CLIs remain installed separately.
+Open **CrewCode.app** from Applications, add a project, and choose a native provider and model. The desktop app starts its own local server; no browser or separate server command is required. Install Crew's skills and hooks alongside your authenticated host CLIs. The optional **Crew · automatic routing** ACP provider remains available for automatically routed conversations.
 
 To build the unsigned macOS app from this checkout:
 

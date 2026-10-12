@@ -2,35 +2,25 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
+import {
+  crewCodeProviderSettings,
+  migrateCrewCodeSettings,
+} from "../../apps/desktop/src/crewCodeBootstrap.ts";
 
 export const repository = NodePath.resolve(
   NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
   "../..",
 );
 
-export function providerSettings({ home, crewBin }) {
-  return {
-    defaultModelSelection: { instanceId: "crew", model: "crew-auto" },
-    providerInstances: {
-      codex: { driver: "codex", enabled: false },
-      claudeAgent: { driver: "claudeAgent", enabled: false },
-      crew: {
-        driver: "acpRegistry",
-        enabled: true,
-        displayName: "Crew",
-        environment: [
-          { name: "CREWCODE_HOME", value: home, sensitive: false },
-          { name: "CREWCODE_CREW_BIN", value: crewBin, sensitive: false },
-        ],
-        config: {
-          source: "local",
-          commandPath: process.execPath,
-          commandArgs: [NodePath.join(repository, "scripts/crewcode/acp.mjs")],
-          customModels: ["crew-auto"],
-        },
-      },
-    },
-  };
+const providerInput = ({ home, crewBin }) => ({
+  home,
+  crewBin,
+  executablePath: process.execPath,
+  adapterPath: NodePath.join(repository, "scripts/crewcode/acp.mjs"),
+});
+
+export function providerSettings(input) {
+  return crewCodeProviderSettings(providerInput(input));
 }
 
 export async function setup({
@@ -40,9 +30,15 @@ export async function setup({
   home = NodePath.resolve(home);
   const directory = NodePath.join(home, "userdata");
   const path = NodePath.join(directory, "settings.json");
+  let contents;
   let existing;
   try {
-    existing = JSON.parse(await NodeFSP.readFile(path, "utf8"));
+    contents = await NodeFSP.readFile(path, "utf8");
+    try {
+      existing = JSON.parse(contents);
+    } catch {
+      // Preserve JSONC settings; the server owns parsing and validation.
+    }
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
@@ -52,35 +48,41 @@ export async function setup({
     savedCrew?.environment?.find((entry) => entry.name === "CREWCODE_CREW_BIN")?.value ||
     "crew";
   if (crewBin.includes("/")) crewBin = await NodeFSP.realpath(NodePath.resolve(crewBin));
-  const settings = providerSettings({ home, crewBin });
+  const generated = providerSettings({ home, crewBin });
   await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
-  try {
-    await NodeFSP.writeFile(path, `${JSON.stringify(settings, null, 2)}\n`, {
-      flag: "wx",
-      mode: 0o600,
-    });
-  } catch (error) {
-    if (error.code !== "EEXIST") throw error;
-    const saved = JSON.parse(await NodeFSP.readFile(path, "utf8"));
-    const actual = saved.providerInstances?.crew;
-    const expected = settings.providerInstances.crew;
-    if (
-      actual?.driver !== expected.driver ||
-      actual?.config?.source !== "local" ||
-      actual.config.commandPath !== expected.config.commandPath ||
-      JSON.stringify(actual.config.commandArgs) !== JSON.stringify(expected.config.commandArgs) ||
-      expected.environment.some(
-        (entry) =>
-          actual.environment?.find((item) => item.name === entry.name)?.value !== entry.value,
-      )
-    ) {
-      throw new Error(
-        `Existing settings at ${path} have different Crew configuration. Change Crew in Settings → Providers or choose a new --home directory.`,
-        { cause: error },
-      );
+  if (contents !== undefined) {
+    const migrated = migrateCrewCodeSettings(contents, providerInput({ home, crewBin }));
+    if (migrated) {
+      const temporaryPath = `${path}.native-migration`;
+      try {
+        await NodeFSP.writeFile(temporaryPath, `${JSON.stringify(migrated, null, 2)}\n`, {
+          flag: "wx",
+          mode: 0o600,
+        });
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        return { home, path, crewBin, settings: existing };
+      }
+      try {
+        await NodeFSP.rename(temporaryPath, path);
+        existing = migrated;
+      } catch (error) {
+        await NodeFSP.rm(temporaryPath, { force: true });
+        throw error;
+      }
+    }
+  } else {
+    try {
+      await NodeFSP.writeFile(path, `${JSON.stringify(generated, null, 2)}\n`, {
+        flag: "wx",
+        mode: 0o600,
+      });
+      existing = generated;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
     }
   }
-  return { home, path, crewBin, settings };
+  return { home, path, crewBin, settings: existing };
 }
 
 export function options(argv = process.argv.slice(2)) {

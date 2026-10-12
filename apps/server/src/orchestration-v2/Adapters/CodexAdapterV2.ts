@@ -1,3 +1,4 @@
+import * as CrewNativeRuntime from "../../provider/CrewNativeRuntime.ts";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -1559,6 +1560,7 @@ export const layerAppServerClientFactory: Layer.Layer<
 );
 
 export type CodexAdapterV2DriverEnv =
+  | ChildProcessSpawner.ChildProcessSpawner
   | CodexAppServerClientFactory
   | Crypto.Crypto
   | FileSystem.FileSystem
@@ -1624,6 +1626,8 @@ export const CodexAdapterV2Driver: ProviderAdapterDriver<CodexSettings, CodexAda
 const layer: Layer.Layer<
   ProviderAdapter.ProviderAdapterV2,
   never,
+  | ChildProcessSpawner.ChildProcessSpawner
+  | Path.Path
   | CodexAppServerClientFactory
   | Crypto.Crypto
   | FileSystem.FileSystem
@@ -1690,6 +1694,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   const readMcpSession = (threadId: ThreadId | null) =>
     threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
+  const crewSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const crewPath = yield* Path.Path;
   const continuationRequests = adapterOptions.continuationRequests;
 
   return ProviderAdapter.ProviderAdapterV2.of({
@@ -1903,6 +1909,37 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
         const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
           Queue.offer(events, event).pipe(Effect.asVoid);
+        const crew = yield* CrewNativeRuntime.make({
+          host: "codex",
+          driver: CODEX_PROVIDER,
+          environment: adapterOptions.environment,
+          emit: emitProviderEvent,
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, crewSpawner),
+          Effect.provideService(Path.Path, crewPath),
+        );
+        yield* Effect.addFinalizer(() =>
+          Effect.gen(function* () {
+            if (!crew.enabled) return;
+            for (const context of (yield* Ref.get(activeTurns)).values()) {
+              if (context.subagent !== null) continue;
+              const nativeThreadId = context.providerThread.nativeThreadRef?.nativeId;
+              if (nativeThreadId)
+                yield* client
+                  .request("turn/interrupt", {
+                    threadId: nativeThreadId,
+                    turnId: context.nativeTurnId,
+                  })
+                  .pipe(Effect.ignore);
+            }
+            yield* crew.close.pipe(
+              Effect.catch(() =>
+                Effect.logWarning("crew-native-cleanup-failed", { driver: CODEX_PROVIDER }),
+              ),
+            );
+          }),
+        );
 
         /** Writes the thread's current native goal onto its root provider thread. */
         const emitGoalUpdate = Effect.fnUntraced(function* (nativeThreadId: string) {
@@ -2034,6 +2071,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               },
             });
             yield* rememberRootProviderThread(input.turnInput.providerThread);
+            const nativeThreadId = context.providerThread.nativeThreadRef?.nativeId;
+            if (nativeThreadId)
+              yield* crew.observe({
+                nativeThreadId,
+                input: input.turnInput,
+                providerTurnId,
+                ordinal: (id) => resolveItemOrdinal(context, id),
+              });
             return context;
           });
 
@@ -5727,6 +5772,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               if (current !== input.context) {
                 return false;
               }
+              const crewThreadId = input.context.providerThread.nativeThreadRef?.nativeId;
+              if (input.context.subagent === null && crewThreadId)
+                yield* crew.finish(
+                  crewThreadId,
+                  input.context.providerTurnId,
+                  input.status !== "completed",
+                );
               const providerRetry = yield* Ref.modify(providerRetries, (current) => {
                 const retry = current.get(input.context.providerTurnId);
                 if (retry === undefined) {
@@ -6421,6 +6473,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           // against a long-delayed resume. Codex emits no resume-expected
           // signal to pin on.
           hasPendingBackgroundWork: Effect.gen(function* () {
+            yield* crew.refresh;
+            if (yield* crew.pending()) return true;
             for (const items of (yield* Ref.get(runningCommandItemsByTurn)).values()) {
               if (items.size > 0) {
                 return true;
@@ -6443,6 +6497,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           }),
           hasPendingBackgroundWorkForThread: (providerThread) =>
             Effect.gen(function* () {
+              yield* crew.refresh;
+              const crewThreadId = providerThread.nativeThreadRef?.nativeId;
+              if (crewThreadId && (yield* crew.pending(crewThreadId))) return true;
               const contexts = [
                 ...(yield* Ref.get(activeTurns)).values(),
                 ...(yield* Ref.get(settledTurns)).values(),
@@ -6688,6 +6745,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(unloadInput.providerThread);
               yield* client.request("thread/unsubscribe", { threadId: nativeThreadId });
+              yield* crew.stop(nativeThreadId);
             }).pipe(
               Effect.mapError((cause) =>
                 cause._tag === "ProviderAdapterProtocolError"
@@ -7077,6 +7135,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 Effect.ensuring(cleanupInterruptState),
               );
             }).pipe(
+              Effect.tap(() => {
+                const nativeThreadId = requestedInput.providerThread.nativeThreadRef?.nativeId;
+                return nativeThreadId ? crew.stop(nativeThreadId) : Effect.void;
+              }),
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterInterruptError({

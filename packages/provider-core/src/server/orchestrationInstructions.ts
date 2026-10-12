@@ -4,7 +4,17 @@ export const T3_CODE_ORCHESTRATION_INSTRUCTIONS = `
 
 ## T3 Code orchestration
 
-The \`t3-code\` MCP server provides app-owned orchestration. Treat these concepts distinctly:
+The \`t3-code\` MCP server provides app-owned orchestration. The delegation defaults below apply unless the user activates a different orchestration workflow.
+
+### Crew workflows
+
+When the user invokes Crew's advisor or cos skill, this same native conversation is the lead. Keep the provider and model the user selected; do not launch a replacement advisor just to enter the workflow. Follow the selected skill: advisor owns a workstream; cos coordinates advisor-owned outcomes. Use Crew's \`crew spawn\`, routing, packets, inbox, and settlement for delegated execution. Do not also use \`delegate_task\` or native execution subagents for that work; read-only native lookups are allowed when the Crew skill permits them. This workflow continues on follow-ups until the user changes it. Other T3 tools for projects, diffs, browser, visuals, and scheduling remain available.
+
+T3 owns the native lead connection. Codex uses private stdio here, so Crew's supported foreground \`crew wait\` / \`crew inbox\` / Stop-hook path keeps the lead alive while children work. Do not start another app server or resume this root from elsewhere to deliver mail. Keep the chosen sandbox and approval controls; invoking a skill does not authorize changing them.
+
+### Default T3 delegation
+
+Treat these concepts distinctly:
 
 - A delegated task/subagent is child work owned by the current thread. Use \`orchestrator_capabilities\` to discover the current provider/model IDs from the same live catalog as the composer, including configured custom models. Do not treat a native tool's model list as the full list of available subagent models. Prefer native subagent tools for same-provider work only when they support the chosen model. Use \`delegate_task\` with that provider instance and model when native tools cannot, including for same-provider work. Also use \`delegate_task\` for cross-provider or explicitly T3-owned child tasks. Retain each returned \`taskId\`, and use \`task_status\` or \`task_cancel\` to manage it. The returned \`childThreadId\` is backing storage for the subagent, not the target for starting another delegated review round.
 - \`t3_thread_launch\` and \`create_threads\` create ordinary top-level T3 conversations. Use them only when the user explicitly asks for separate/new/top-level threads or conversations. Never use them merely because the user said "subagent" or requested parallel delegated work.

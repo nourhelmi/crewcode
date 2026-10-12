@@ -2507,6 +2507,68 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
 
+  it.effect("rejected stale Stop leaves the current native root's Crew workers running", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-crew-stale-stop-" });
+        const command = path.join(home, "crew.mjs");
+        const metaPath = path.join(home, "runs", "worker", "meta.json");
+        yield* fs.makeDirectory(path.join(home, "runs", "worker"), { recursive: true });
+        yield* fs.writeFileString(
+          command,
+          `#!${yield* HostProcess.ExecutablePath}\n` +
+            `import fs from 'node:fs'; import path from 'node:path';
+const home=process.env.CREW_HOME; fs.appendFileSync(path.join(home,'calls'),'stop\\n');
+const p=path.join(home,'runs','worker','meta.json'); const r=JSON.parse(fs.readFileSync(p,'utf8')); r.state='stopped'; fs.writeFileSync(p,JSON.stringify(r));\n`,
+        );
+        yield* fs.chmod(command, 0o700);
+        yield* fs.writeFileString(
+          metaPath,
+          JSON.stringify({
+            id: "worker",
+            name: "worker",
+            role: "builder",
+            cwd: home,
+            createdAt: "1970-01-01T00:00:00.000Z",
+            state: "running",
+            parent: { mailbox: `claude-${WAKE_NATIVE_SESSION}` },
+            route: { host: "codex", model: "gpt-test", effort: "high" },
+          }),
+        );
+        const harness = yield* makeWakeHarnessWithOptions({
+          environment: { CREW_HOME: home, CREWCODE_CREW_BIN: command },
+          close: Queue.shutdown,
+        });
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("crew-current-turn"),
+            text: "Continue owned work.",
+            attachments: [],
+          }),
+        );
+        const stale = yield* Effect.result(
+          harness.runtime.interruptTurn({
+            providerThread: harness.providerThread,
+            providerTurnId: ProviderTurnId.make("stale-prior-turn"),
+          }),
+        );
+        assert.equal(stale._tag, "Failure");
+        assert.isFalse(yield* fs.exists(path.join(home, "calls")));
+        assert.include(yield* fs.readFileString(metaPath), '\"state\":\"running\"');
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect.each([
     { isError: false, title: "Check weather" },
     { isError: true, title: "Check weather" },
