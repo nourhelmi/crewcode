@@ -29,7 +29,24 @@ const Run = Schema.Struct({
   parent: Schema.Struct({ mailbox: Schema.String }),
   route: Schema.Struct({ host: Schema.String, model: Schema.String, effort: Schema.String }),
   turn: Schema.optional(Schema.Number),
-  amendment: Schema.optional(Schema.Struct({ number: Schema.Number })),
+  amendment: Schema.optional(
+    Schema.Struct({ number: Schema.Number, resultHash: Schema.optional(Schema.String) }),
+  ),
+  assignment: Schema.optional(
+    Schema.Struct({
+      id: SafeId,
+      revision: Schema.Number,
+      status: Schema.Literals(["active", "submitted", "accepted"]),
+      submission: Schema.optional(SafeId),
+      submissions: Schema.Array(
+        Schema.Struct({
+          ref: SafeId,
+          hash: Schema.String,
+          revision: Schema.Number,
+        }),
+      ),
+    }),
+  ),
   settled: Schema.optional(
     Schema.Struct({
       ref: Schema.optional(SafeId),
@@ -42,6 +59,28 @@ const Run = Schema.Struct({
 });
 type Run = typeof Run.Type;
 const decodeRun = Schema.decodeUnknownOption(Schema.fromJsonString(Run));
+
+// Retirement ends the worker process, not a delivered outcome. An old settlement alone
+// cannot prove delivery: amendments, new assignments, and reopened drafts invalidate it.
+const completedAssignment = (run: Run): boolean => {
+  const { assignment, settled } = run;
+  if (
+    !assignment ||
+    assignment.status === "active" ||
+    !settled?.ref ||
+    assignment.submission !== settled.ref ||
+    settled.ref !== `${assignment.id}-r${assignment.revision}-${settled.hash}` ||
+    run.amendment?.resultHash === settled.hash ||
+    !/^(DONE|PASS(ED)?)\b/i.test(settled.status)
+  )
+    return false;
+  return assignment.submissions.some(
+    (submission) =>
+      submission.ref === settled.ref &&
+      submission.hash === settled.hash &&
+      submission.revision === assignment.revision,
+  );
+};
 
 export class CrewStopError extends Schema.TaggedError<CrewStopError>()("CrewStopError", {
   mailbox: Schema.String,
@@ -181,10 +220,16 @@ export const make = Effect.fn("CrewNativeRuntime.make")(function* (options: {
       Date.parse(run.settled?.at ?? run.createdAt) < DateTime.toEpochMillis(root.started)
     )
       return;
+    const completed = completedAssignment(run);
     const signature = [
       run.state,
+      completed,
       run.turn,
       run.amendment?.number,
+      run.assignment?.id,
+      run.assignment?.revision,
+      run.assignment?.status,
+      run.assignment?.submission,
       run.settled?.hash,
       run.waitingSince,
     ].join("\0");
@@ -196,7 +241,9 @@ export const make = Effect.fn("CrewNativeRuntime.make")(function* (options: {
       run.state === "running"
         ? "running"
         : run.state === "stopped"
-          ? "interrupted"
+          ? completed
+            ? "completed"
+            : "interrupted"
           : ["failed", "blocked", "stalled"].includes(run.state)
             ? "failed"
             : "completed";

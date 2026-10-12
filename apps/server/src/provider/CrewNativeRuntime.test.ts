@@ -242,6 +242,114 @@ describe("native Crew worker boundary", () => {
       ),
   );
 
+  it.effect(
+    "retirement preserves completed assignments but cancellation never reuses old delivery",
+    () =>
+      test(() =>
+        Effect.gen(function* () {
+          const h = yield* fixture();
+          const settled = {
+            ref: "task-r1-proof",
+            hash: "proof",
+            at: "1970-01-01T00:00:00.000Z",
+            status: "DONE: delivered outcome",
+          };
+          const assignment = {
+            id: "task",
+            revision: 1,
+            status: "accepted",
+            submission: settled.ref,
+            submissions: [{ ref: settled.ref, hash: settled.hash, revision: 1 }],
+          };
+          const cases = [
+            { id: "accepted", assignment, status: "completed" },
+            { id: "failed-result", assignment, resultStatus: "FAIL", status: "interrupted" },
+            {
+              id: "wrong-assignment",
+              assignment: { ...assignment, id: "next" },
+              status: "interrupted",
+            },
+            {
+              id: "submitted",
+              assignment: { ...assignment, status: "submitted" },
+              status: "completed",
+            },
+            {
+              id: "active-followup",
+              assignment: { ...assignment, status: "active", revision: 2 },
+              status: "interrupted",
+            },
+            {
+              id: "old-revision",
+              assignment: { ...assignment, revision: 2 },
+              status: "interrupted",
+            },
+            {
+              id: "new-assignment",
+              assignment: {
+                ...assignment,
+                id: "next",
+                status: "active",
+                submission: undefined,
+                submissions: [],
+              },
+              status: "interrupted",
+            },
+            {
+              id: "changed-submission",
+              assignment: { ...assignment, submission: "task-r2-new" },
+              status: "interrupted",
+            },
+            {
+              id: "same-result-amendment",
+              assignment,
+              amendment: { number: 2, resultHash: "proof" },
+              status: "interrupted",
+            },
+            { id: "legacy-settlement", assignment: undefined, status: "interrupted" },
+          ];
+          for (const item of cases) yield* h.write(item.id);
+          yield* h.runtime.observe(h.root());
+          for (const item of cases) {
+            yield* h.write(item.id, "codex-native-root", {
+              state: "stopped",
+              settled: { ...settled, status: item.resultStatus ?? settled.status },
+              assignment: item.assignment,
+              ...(item.amendment ? { amendment: item.amendment } : {}),
+            });
+          }
+          yield* h.runtime.refresh;
+          for (const item of cases) {
+            const card = h.items().findLast((event) => event.turnItem.id.endsWith(`:${item.id}`))!;
+            assert.equal(card.turnItem.status, item.status, item.id);
+          }
+          // Status is reprojected when assignment evidence changes, even while stopped
+          // and with the same settlement hash and assignment identity.
+          for (const [current, expected] of [
+            [{ ...assignment, status: "active" }, "interrupted"],
+            [
+              { ...assignment, submissions: [{ ref: settled.ref, hash: "stale", revision: 1 }] },
+              "interrupted",
+            ],
+            [assignment, "completed"],
+          ] as const) {
+            yield* h.write("accepted", "codex-native-root", {
+              state: "stopped",
+              settled,
+              assignment: current,
+            });
+            yield* h.runtime.refresh;
+            assert.equal(
+              h.items().findLast((event) => event.turnItem.id.endsWith(":accepted"))!.turnItem
+                .status,
+              expected,
+            );
+          }
+          assert.isFalse(yield* h.runtime.pending());
+        }),
+      ),
+  );
+
   it.effect("close attempts every root and aggregates failures", () =>
     test(() =>
       Effect.gen(function* () {
@@ -261,7 +369,7 @@ describe("native Crew worker boundary", () => {
         assert.isFalse(yield* h.runtime.pending("second-root"));
         assert.include(
           yield* h.fs.readFileString(h.path.join(h.home, "runs", "second", "meta.json")),
-          '\"state\":\"stopped\"',
+          '"state":"stopped"',
         );
       }),
     ),

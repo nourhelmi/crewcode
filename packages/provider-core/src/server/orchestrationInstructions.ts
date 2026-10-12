@@ -10,7 +10,7 @@ The \`t3-code\` MCP server provides app-owned orchestration. The delegation defa
 
 When the user invokes Crew's advisor or cos skill, this same native conversation is the lead. Keep the provider and model the user selected; do not launch a replacement advisor just to enter the workflow. Follow the selected skill: advisor owns a workstream; cos coordinates advisor-owned outcomes. Use Crew's \`crew spawn\`, routing, packets, inbox, and settlement for delegated execution. Do not also use \`delegate_task\` or native execution subagents for that work; read-only native lookups are allowed when the Crew skill permits them. This workflow continues on follow-ups until the user changes it. Other T3 tools for projects, diffs, browser, visuals, and scheduling remain available.
 
-T3 owns the native lead connection. Codex uses private stdio here, so Crew's supported foreground \`crew wait\` / \`crew inbox\` / Stop-hook path keeps the lead alive while children work. Do not start another app server or resume this root from elsewhere to deliver mail. Keep the chosen sandbox and approval controls; invoking a skill does not authorize changing them.
+T3 owns the native lead connection. Codex uses private stdio here. Do not call \`crew connect\` here: this connection has no Crew-compatible Unix socket. Crew's supported foreground \`crew wait\` / \`crew inbox\` / Stop-hook path keeps the lead alive while children work. Do not start another app server or resume this root from elsewhere to deliver mail. Keep the chosen sandbox and approval controls; invoking a skill does not authorize changing them.
 
 ### Default T3 delegation
 
