@@ -1,3 +1,4 @@
+import { subagentAttentionSummary } from "@t3tools/client-runtime/state/subagent-display";
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
@@ -430,7 +431,7 @@ import {
   useThreadStatus,
   useThreadHistory,
   useThreadShell,
-  useChildThreadInputs,
+  useChildThreadAttention,
   useThreadRefs,
   useThreadVisibleTurnItems,
   waitForThreadShell,
@@ -7436,22 +7437,20 @@ export default function ChatView(props: ChatViewProps) {
     },
     [environmentId, navigate],
   );
-  const childThreadInputs = useChildThreadInputs(activeThreadRef);
+  const childThreadAttention = useChildThreadAttention(activeThreadRef);
   const childInputBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
-    const first = childThreadInputs[0];
+    const first = childThreadAttention[0];
     const parentAwaitingUser =
       activePendingApproval || activePendingUserInput || activeThreadShell?.hasPendingUserInput;
-    if (!first || parentAwaitingUser) return null;
+    const attention = subagentAttentionSummary(childThreadAttention);
+    if (!first || !attention || parentAwaitingUser) return null;
     return {
       id: `child-input:${first.id}`,
       variant: "info",
       priority: "activity",
       icon: <MessageCircleIcon />,
-      title:
-        childThreadInputs.length === 1
-          ? "Subagent needs input"
-          : `${childThreadInputs.length} subagents need input`,
-      description: childThreadInputs.map((child, index) => (
+      title: attention.label,
+      description: childThreadAttention.map((child, index) => (
         <Fragment key={child.id}>
           {index > 0 ? ", " : null}
           <InlineButton tone="muted" onClick={() => onOpenRelatedThread(child.id)}>
@@ -7461,12 +7460,12 @@ export default function ChatView(props: ChatViewProps) {
       )),
       actions: (
         <Button size="xs" variant="ghost" onClick={() => onOpenRelatedThread(first.id)}>
-          Open question
+          {attention.actionLabel}
         </Button>
       ),
     };
   }, [
-    childThreadInputs,
+    childThreadAttention,
     activePendingApproval,
     activePendingUserInput,
     activeThreadShell?.hasPendingUserInput,

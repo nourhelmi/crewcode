@@ -86,6 +86,7 @@ const ProbeToolkit = Toolkit.make(
   Tool.make("reads", probe),
   Tool.make("reads_as_caller", probe),
   Tool.make("acts_as_caller", probe),
+  Tool.make("acts_as_retained_crew_caller", probe),
   Tool.make("writes", probe),
   Tool.make("writes_with_capability", probe),
   Tool.make("writes_threads", {
@@ -106,6 +107,7 @@ const probeHandlers: McpToolAccess.Handlers<typeof ProbeToolkit.tools> = {
   reads: McpToolAccess.reads(() => ran),
   reads_as_caller: McpToolAccess.readsAsCaller(() => ran),
   acts_as_caller: McpToolAccess.actsAsCaller(() => ran),
+  acts_as_retained_crew_caller: McpToolAccess.actsAsRetainedCrewCaller(() => ran),
   writes: McpToolAccess.writes(() => ran),
   writes_with_capability: McpToolAccess.writesWithCapability(() => ran),
   writes_threads: McpToolAccess.writesThreads(
@@ -217,6 +219,9 @@ it.effect.each([
   ["reads_as_caller", fullAccessClient, {}, "thread_credential_required"],
   ["acts_as_caller", supervised, {}, "ran"],
   ["acts_as_caller", ended, {}, "parent_not_active"],
+  ["acts_as_retained_crew_caller", ended, {}, "ran"],
+  ["acts_as_retained_crew_caller", fullAccessClient, {}, "thread_credential_required"],
+  ["acts_as_retained_crew_caller", previewOnly, {}, "capability_denied"],
   ["acts_as_caller", fullAccessClient, {}, "thread_credential_required"],
 
   // Any change needs a thread caller's live turn; a client has none to lose.

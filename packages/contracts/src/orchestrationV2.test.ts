@@ -24,6 +24,9 @@ import {
 } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  OrchestrationV2AppThread,
+  OrchestrationV2AppThreadJson,
+  OrchestrationV2CrewBinding,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
   OrchestrationV2Command,
@@ -102,6 +105,10 @@ const LegacySubscribeThreadInput = Schema.Struct({
 });
 const decodeLegacyShellStreamItem = Schema.decodeUnknownSync(LegacyShellStreamItem);
 const decodeLegacySubscribeThreadInput = Schema.decodeUnknownSync(LegacySubscribeThreadInput);
+const decodeCrewBinding = Schema.decodeUnknownSync(OrchestrationV2CrewBinding);
+const decodeAppThread = Schema.decodeUnknownSync(OrchestrationV2AppThread);
+const decodeAppThreadJson = Schema.decodeSync(OrchestrationV2AppThreadJson);
+const encodeAppThreadJson = Schema.encodeSync(OrchestrationV2AppThreadJson);
 const decodeOrchestrationV2Command = Schema.decodeUnknownSync(OrchestrationV2Command);
 const decodeOrchestrationV2TurnItem = Schema.decodeUnknownSync(OrchestrationV2TurnItem);
 const decodeOrchestrationV2TurnItemJson = Schema.decodeUnknownSync(OrchestrationV2TurnItemJson);
@@ -662,6 +669,66 @@ describe("orchestration V2 contracts", () => {
     expect(command.parentNodeId).toBe(NodeId.make("node-parent-1"));
   });
 
+  it("persists an explicit Crew worker binding and disables native completion wakes", () => {
+    const crew = {
+      runId: "b-worker",
+      home: "/tmp/crew-state",
+      configPath: "/tmp/crew-config.json",
+      rosterPath: "/tmp/crew-roster.json",
+      router: "off" as const,
+    };
+    const thread = decodeAppThread({
+      ...emptyThreadProjection().thread,
+      crew,
+    });
+    const json = encodeAppThreadJson(thread);
+    expect(decodeAppThreadJson(json).crew).toEqual(crew);
+    expect(decodeAppThread(emptyThreadProjection().thread).crew).toBeUndefined();
+    const command = decodeOrchestrationV2Command({
+      type: "delegated_task.request",
+      createdBy: "agent",
+      creationSource: "mcp",
+      commandId: "crew-delegate",
+      parentThreadId: "thread-parent",
+      parentRunId: "run-parent",
+      parentNodeId: "node-parent",
+      task: "Implement the packet.",
+      modelSelection: { instanceId: "codex", model: "gpt-6-luna" },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      completionWake: "none",
+      crew,
+    });
+    expect(command).toMatchObject({ crew, completionWake: "none" });
+    expect(
+      decodeOrchestrationV2Command({
+        type: "delegated_task.wake-policy",
+        commandId: "crew-wake-policy",
+        parentThreadId: "thread-parent",
+        taskId: "node-child",
+        completionWake: "none",
+      }),
+    ).toMatchObject({ completionWake: "none" });
+  });
+
+  it("keeps the Crew binding limited to validated ownership and routing fields", () => {
+    const decode = decodeCrewBinding;
+    expect(
+      decode({ runId: "b-worker", home: "/tmp/crew", env: { TOKEN: "not-a-secret" } }),
+    ).toEqual({
+      runId: "b-worker",
+      home: "/tmp/crew",
+    });
+    for (const invalid of [
+      { runId: "", home: "/tmp/crew" },
+      { runId: "b-worker", home: "" },
+      { runId: "b-worker", home: "/tmp/crew", configPath: "" },
+      { runId: "b-worker", home: "/tmp/crew", rosterPath: "" },
+      { runId: "b-worker", home: "/tmp/crew", router: "auto" },
+    ])
+      expect(() => decode(invalid)).toThrow();
+  });
+
   it("decodes delegated task wake-policy commands", () => {
     const command = decodeOrchestrationV2Command({
       type: "delegated_task.wake-policy",
@@ -1023,6 +1090,7 @@ describe("orchestration V2 contracts", () => {
     expect(decode({ ...appOwnedSubagent, completionWake: "settled_only" }).completionWake).toBe(
       "settled_only",
     );
+    expect(decode({ ...appOwnedSubagent, completionWake: "none" }).completionWake).toBe("none");
     expect(() => decode({ ...appOwnedSubagent, completionWake: "sometimes" })).toThrow();
   });
 

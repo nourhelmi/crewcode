@@ -361,6 +361,16 @@ export const OrchestrationV2LimitRecoveryUpdate = Schema.Struct({
 );
 export type OrchestrationV2LimitRecoveryUpdate = typeof OrchestrationV2LimitRecoveryUpdate.Type;
 
+/** Explicit Crew ownership for one native worker chat. Never inherited by forks. */
+export const OrchestrationV2CrewBinding = Schema.Struct({
+  runId: TrimmedNonEmptyString,
+  home: TrimmedNonEmptyString,
+  configPath: Schema.optional(TrimmedNonEmptyString),
+  rosterPath: Schema.optional(TrimmedNonEmptyString),
+  router: Schema.optional(Schema.Literals(["on", "off"])),
+});
+export type OrchestrationV2CrewBinding = typeof OrchestrationV2CrewBinding.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -380,6 +390,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
+  crew: Schema.optional(OrchestrationV2CrewBinding),
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([
@@ -764,8 +775,9 @@ export const OrchestrationV2Subagent = Schema.Struct({
   // every terminal (async delegations; queue_after_active sequences it behind
   // a live parent run), "settled_only" offers only when the parent has no
   // live run (wait-mode delegations, whose result returns through the
-  // blocking tool call). Absent on legacy records; treated as settled_only.
-  completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+  // blocking tool call). "none" leaves settlement and wakes to Crew.
+  // Absent on legacy records; treated as settled_only.
+  completionWake: Schema.optional(Schema.Literals(["always", "settled_only", "none"])),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
   status: Schema.Literals([
     "idle",
@@ -2928,6 +2940,8 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("message.dispatch"),
+    /** Crew resumes only an idle bound worker; the orchestrator validates provenance. */
+    crewResume: Schema.optional(Schema.Boolean),
     notification: Schema.optional(OrchestrationV2Notification),
     ...OrchestrationV2CreationFields,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
@@ -3107,12 +3121,13 @@ export const OrchestrationV2Command = Schema.Union([
     parentNodeId: NodeId,
     task: TrimmedNonEmptyString,
     title: Schema.optional(TrimmedNonEmptyString),
+    crew: Schema.optional(OrchestrationV2CrewBinding),
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
     // Omitted behaves as "settled_only" (no wake while the parent has a live
     // run); producers that want fire-and-forget wakes must set "always".
-    completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+    completionWake: Schema.optional(Schema.Literals(["always", "settled_only", "none"])),
     createdAt: Schema.optional(Schema.DateTimeUtc),
   }),
   Schema.Struct({
@@ -3120,7 +3135,7 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     parentThreadId: ThreadId,
     taskId: NodeId,
-    completionWake: Schema.Literals(["always", "settled_only"]),
+    completionWake: Schema.Literals(["always", "settled_only", "none"]),
   }),
   Schema.Struct({
     type: Schema.Literal("delegated_task.completion-delivery.acknowledge"),

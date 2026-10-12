@@ -38,6 +38,13 @@ describe("resolveT3McpToolPresentation", () => {
     });
   });
 
+  it("pretty prints native Crew worker controls", () => {
+    expect(resolveT3McpToolPresentation("mcp__t3-code__crew_worker")).toEqual({
+      displayName: "Manage a Crew worker",
+      logo: "t3-code",
+    });
+  });
+
   it("pretty prints thread metadata updates", () => {
     expect(resolveT3McpToolPresentation("mcp__t3-code__t3_thread_update")).toEqual({
       displayName: "Update T3 thread metadata",

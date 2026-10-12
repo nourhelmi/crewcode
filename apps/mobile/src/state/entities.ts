@@ -98,8 +98,8 @@ export function useThreadShell(ref: ScopedThreadRef | null): EnvironmentThreadSh
   );
 }
 
-export function useChildThreadInputs(ref: ScopedThreadRef) {
-  return useAtomValue(environmentThreadShells.childThreadInputsAtom(ref));
+export function useChildThreadAttention(ref: ScopedThreadRef) {
+  return useAtomValue(environmentThreadShells.childThreadAttentionAtom(ref));
 }
 
 /** `markdown` with each thread link labeled by the thread's current title in `environmentId`. */

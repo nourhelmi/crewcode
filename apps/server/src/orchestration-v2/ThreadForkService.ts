@@ -85,8 +85,9 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
             cause: forkableSourceRunStatusError(input.sourceRun),
           });
         }
+        const { crew: _crew, ...sourceThread } = input.sourceProjection.thread;
         const targetThread: OrchestrationV2AppThread = {
-          ...input.sourceProjection.thread,
+          ...sourceThread,
           createdBy: input.createdBy,
           creationSource: input.creationSource,
           id: input.targetThreadId,

@@ -50,6 +50,7 @@ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
+import * as CrewNativeControl from "../provider/CrewNativeControl.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
@@ -519,6 +520,7 @@ const make = Effect.gen(function* () {
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+  const crewControl = yield* Effect.serviceOption(CrewNativeControl.CrewNativeControl);
 
   const assertProviderInstanceEnabled: ThreadManagementServiceShape["assertProviderInstanceEnabled"] =
     (input) =>
@@ -651,10 +653,112 @@ const make = Effect.gen(function* () {
     }
   };
 
+  const prepareCrewMessage = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
+    if (
+      command.type !== "message.dispatch" ||
+      command.createdBy !== "user" ||
+      (yield* hasReceipt(command.commandId))
+    )
+      return command;
+    const { thread } = yield* orchestrator.getThreadRecords(command.threadId, []);
+    if (!thread.crew) return command;
+    if (Option.isNone(crewControl))
+      return yield* new Orchestrator.OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Crew packet amendment service is unavailable; retry after restarting the server.",
+      });
+    yield* crewControl.value
+      .amend({
+        crew: thread.crew,
+        providerInstanceId: thread.providerInstanceId,
+        requestId: command.commandId,
+        text:
+          command.text.trim() ||
+          (command.attachments.length > 0
+            ? `Human follow-up with ${command.attachments.length} attached file(s); inspect the attachments in this native chat.`
+            : command.text),
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new Orchestrator.OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause,
+            }),
+        ),
+      );
+    // The original user text remains the visible message; the durable amendment and
+    // unread inbox are authoritative when the worker's next native turn starts.
+    return command;
+  });
+  const retireCrewThread = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
+    if (
+      command.type !== "thread.stop" &&
+      command.type !== "thread.archive" &&
+      command.type !== "thread.delete"
+    )
+      return;
+    const stopped = yield* orchestrator.getThreadRecords(command.threadId, [
+      "providerThreads",
+      "runs",
+      "runtimeRequests",
+    ]);
+    const { thread, providerThreads } = stopped;
+    if (!thread.crew) return;
+    if (Option.isNone(crewControl))
+      return yield* new Orchestrator.OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Crew lifecycle service is unavailable; retry after restarting the server.",
+      });
+    const fenced = yield* crewControl.value
+      .retire({ crew: thread.crew, providerInstanceId: thread.providerInstanceId })
+      .pipe(Effect.result);
+    // Crew-bound children have dedicated runtimes. Stop closes even a retained idle
+    // runtime, whose untracked subprocesses cannot be inferred from run status.
+    const busy =
+      latestActiveRun(stopped) !== undefined ||
+      stopped.runtimeRequests.some((request) => request.status === "pending") ||
+      providerThreads.some((row) => (row.pendingBackgroundTasks?.length ?? 0) > 0);
+    const detached = yield* Effect.forEach(
+      busy
+        ? []
+        : [
+            ...new Set(
+              providerThreads.flatMap((row) =>
+                row.providerSessionId ? [row.providerSessionId] : [],
+              ),
+            ),
+          ],
+      (providerSessionId) =>
+        sessions
+          .detach({
+            providerSessionId,
+            threadId: thread.id,
+            revokeMcpCredential: true,
+            detail: "Crew native worker stopped.",
+          })
+          .pipe(Effect.result),
+    );
+    const failed =
+      fenced._tag === "Failure" ? fenced : detached.find((result) => result._tag === "Failure");
+    if (failed?._tag === "Failure")
+      return yield* new Orchestrator.OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: failed.failure,
+      });
+  });
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     ensureCommandTranscripts(command).pipe(
       Effect.andThen(assertDispatchTargetEnabled(command)),
-      Effect.andThen(orchestrator.dispatch(command)),
+      Effect.andThen(prepareCrewMessage(command)),
+      Effect.flatMap(orchestrator.dispatch),
+      // Cleanup retries even when the command replays an existing receipt. The
+      // committed outbox already owns native cancellation before metadata retires.
+      Effect.tap(() => retireCrewThread(command)),
     );
 
   const getProjectThread: ThreadManagementServiceShape["getProjectThread"] = (input) =>
@@ -1084,7 +1188,19 @@ const make = Effect.gen(function* () {
           threadId,
           ...(input.reason === undefined ? {} : { reason: input.reason }),
         }).pipe(
-          Effect.andThen(stopDelegatedTasks({ ...input, threadId })),
+          Effect.result,
+          Effect.flatMap((stopped) =>
+            stopDelegatedTasks({ ...input, threadId }).pipe(
+              Effect.result,
+              Effect.flatMap((descendants) =>
+                stopped._tag === "Failure"
+                  ? Effect.fail(stopped.failure)
+                  : descendants._tag === "Failure"
+                    ? Effect.fail(descendants.failure)
+                    : Effect.void,
+              ),
+            ),
+          ),
           Effect.catch((error) =>
             Effect.logWarning("Unable to stop a delegated task", {
               parentThreadId: input.threadId,

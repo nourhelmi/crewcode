@@ -8,6 +8,24 @@ import { formatModelSlugName, resolveSelectableModel } from "@t3tools/shared/mod
 import { fileBasename } from "@t3tools/shared/path";
 import { isTerminalSubagentStatus } from "./subagentRuntime.ts";
 
+/** The parent opens the child's native request UI; answers stay in that chat. */
+export function subagentAttentionSummary(
+  children: ReadonlyArray<{ readonly hasPendingApprovals: boolean }>,
+) {
+  const first = children[0];
+  if (first === undefined) return null;
+  const approvals = children.filter((child) => child.hasPendingApprovals).length;
+  const reason =
+    approvals === children.length ? "approval" : approvals === 0 ? "input" : "attention";
+  return {
+    label:
+      children.length === 1
+        ? `Subagent needs ${reason}`
+        : `${children.length} subagents need ${reason}`,
+    actionLabel: first.hasPendingApprovals ? "Open approval" : "Open question",
+  };
+}
+
 /** Summarizes one adjacent group, without changing its member identities or order. */
 export function subagentGroupSummary(
   members: ReadonlyArray<{ readonly status: OrchestrationV2TurnItemStatus }>,

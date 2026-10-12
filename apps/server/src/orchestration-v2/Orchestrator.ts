@@ -869,10 +869,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly adapter: ProviderAdapter.ProviderAdapterV2["Service"];
     readonly providerInstanceId: ProviderInstanceId;
     readonly threadId: ThreadId;
+    readonly isolated?: boolean;
   }) =>
     input.adapter.getCapabilities().pipe(
       Effect.flatMap((capabilities) =>
-        capabilities.sessions.supportsMultipleProviderThreadsPerSession
+        capabilities.sessions.supportsMultipleProviderThreadsPerSession && !input.isolated
           ? Effect.succeed(
               idAllocator.derive.providerSession({
                 providerInstanceId: input.providerInstanceId,
@@ -1621,6 +1622,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               adapter,
               providerInstanceId: queuedRun.providerInstanceId,
               threadId,
+              isolated: projection.thread.crew !== undefined,
             }),
           ),
           Effect.mapError(
@@ -3300,6 +3302,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
 
     if (command.type === "thread.archive") {
+      yield* Ref.update(effects, (existing) => [
+        ...existing,
+        {
+          id: `effect:${command.commandId}:delegated-tasks.stop`,
+          commandId: command.commandId,
+          threadId: command.threadId,
+          request: { type: "delegated-tasks.stop", reason: "Parent thread archived." },
+        } satisfies PendingOrchestrationEffectV2,
+      ]);
       const projection = yield* loadProjectionForCommand(
         command,
         ["runs", "attempts", "nodes", "subagents", "messages"],
@@ -4185,6 +4196,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               adapter: targetAdapter,
               providerInstanceId: input.modelSelection.instanceId,
               threadId: input.command.threadId,
+              isolated: input.projection.thread.crew !== undefined,
             }),
           ));
         const targetProviderThreadBase: OrchestrationV2ProviderThread =
@@ -4517,6 +4529,30 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) =>
     Effect.gen(function* () {
       let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      if (command.crewResume === true) {
+        if (
+          !projection.thread.crew ||
+          command.createdBy !== "agent" ||
+          command.creationSource !== "mcp" ||
+          command.dispatchMode.type !== "start_immediately"
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Crew resume requires an owned native child and agent MCP provenance.",
+          });
+        }
+        // Decide against the serialized projection: a concurrent human follow-up
+        // already wakes this worker and its hooks consume the same unread inbox.
+        if (
+          projection.runs.some(isBlockingRun) ||
+          projection.runtimeRequests.some((request) => request.status === "pending") ||
+          projection.providerThreads.some(
+            (thread) => (thread.pendingBackgroundTasks?.length ?? 0) > 0,
+          )
+        )
+          return;
+      }
       if (command.manualContinuationOfRunId !== undefined) {
         const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
         const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -5293,6 +5329,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               adapter,
               providerInstanceId: modelSelection.instanceId,
               threadId: command.threadId,
+              isolated: projection.thread.crew !== undefined,
             }),
           ));
         const providerThreadId =
@@ -5681,6 +5718,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             adapter,
             providerInstanceId: modelSelection.instanceId,
             threadId: command.threadId,
+            isolated: projection.thread.crew !== undefined,
           }),
         ));
       const existingProviderSession = projection.providerSessions.find(
@@ -6572,7 +6610,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const parentRun = parentProjection.runs.find(
         (candidate) => candidate.id === command.parentRunId,
       );
-      if (parentRun === undefined || !isBlockingRun(parentRun)) {
+      if (
+        parentProjection.thread.archivedAt !== null ||
+        parentProjection.thread.deletedAt !== null ||
+        parentRun === undefined ||
+        !isBlockingRun(parentRun)
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -6646,6 +6689,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
+        ...(command.crew === undefined ? {} : { crew: command.crew }),
       };
       const task: OrchestrationV2Subagent = {
         id: taskNodeId,
@@ -6662,7 +6706,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         prompt: command.task,
         title: command.title ?? null,
         model: command.modelSelection.model,
-        ...(command.completionWake === undefined ? {} : { completionWake: command.completionWake }),
+        ...(command.crew !== undefined
+          ? { completionWake: "none" as const }
+          : command.completionWake === undefined
+            ? {}
+            : { completionWake: command.completionWake }),
         status: "running",
         result: null,
         startedAt: now,
@@ -6890,8 +6938,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       modelSelection: run.modelSelection,
       prompt: command.text,
       title: child.title,
-      completionWake: "always",
-      completionDelivery: { state: "pending", observedByRunId: null },
+      completionWake:
+        child.crew !== undefined || original.completionWake === "none" ? "none" : "always",
+      completionDelivery: {
+        state:
+          child.crew !== undefined || original.completionWake === "none" ? "disposed" : "pending",
+        observedByRunId: null,
+      },
       status: run.status === "queued" ? "pending" : "running",
       progress: undefined,
       result: null,
@@ -7008,6 +7061,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Delegated task ${command.taskId} is not an app-owned task of thread ${command.parentThreadId}.`,
       });
     }
+    if (task.completionWake === "none")
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Crew owns this task's completion delivery; its wake policy cannot be changed.",
+      });
     if (task.completionWake === command.completionWake) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -9465,7 +9524,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const target =
         projection.runs.findLast(
           (run) =>
-            run.status === "preparing" || run.status === "starting" || run.status === "running",
+            run.status === "preparing" ||
+            run.status === "starting" ||
+            run.status === "running" ||
+            run.status === "waiting",
         ) ??
         (derivePendingBackgroundWork({
           latestRun,
@@ -9798,6 +9860,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly updatedTask: OrchestrationV2Subagent;
     readonly now: DateTime.Utc;
   }) {
+    if (input.task.completionWake === "none")
+      return {
+        task: {
+          ...input.updatedTask,
+          completionDelivery: { state: "disposed" as const, observedByRunId: null },
+        },
+        parentRun: undefined,
+        message: undefined,
+        offer: false,
+      };
     const taskDelivery = input.updatedTask.completionDelivery;
     // delivered ownership has already settled through a completed wake run.
     // A later wake-policy upgrade must not re-claim the task or offer again.
@@ -10516,6 +10588,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 task.origin === "app_owned" &&
                 task.runId === parentRun.id &&
                 task.completionDelivery?.state === "pending" &&
+                task.completionWake !== "none" &&
                 isTerminalDelegatedTaskStatus(task.status) &&
                 (!parentIsLive || task.completionWake === "always"),
             )
@@ -10775,6 +10848,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "thread.stop":
         cancelUnsettledEffects = yield* dispatchThreadStop(command, events, effects);
+        yield* Ref.update(effects, (existing) => [
+          ...existing,
+          {
+            id: `effect:${command.commandId}:delegated-tasks.stop`,
+            commandId: command.commandId,
+            threadId: command.threadId,
+            request: {
+              type: "delegated-tasks.stop",
+              ...(command.reason === undefined ? {} : { reason: command.reason }),
+            },
+          } satisfies PendingOrchestrationEffectV2,
+        ]);
         break;
       case "queued-message.promote-to-steer":
         yield* dispatchQueuedMessagePromoteToSteer(command, events, effects);
@@ -10968,6 +11053,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         // its expected outcome, not a failure.
         planned.events.length > 0 ||
         command.type === "thread.background-work.settle" ||
+        (command.type === "message.dispatch" && command.crewResume === true) ||
         command.type === "thread.stop" ||
         command.type === "subagent.stop"
           ? Effect.succeed(planned)

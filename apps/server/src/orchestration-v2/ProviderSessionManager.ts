@@ -1601,7 +1601,7 @@ export const layerWithOptions = (
                 return [true, updated] as const;
               });
               if (!unloading) return "skipped" as const;
-              yield* unloadThread({ providerThread: pending.providerThread }).pipe(
+              yield* unloadThread({ providerThread: pending.providerThread, reason: "idle" }).pipe(
                 Effect.timeout(UNLOAD_THREAD_TIMEOUT_MS),
                 Effect.catchCause((cause) =>
                   Effect.logWarning("orchestration-v2.driver-session.idle-unload-failed", {
@@ -2286,13 +2286,17 @@ export const layerWithOptions = (
             const key = sessionKey(input.providerSessionId);
             const currentEntry = (yield* Ref.get(sessions)).get(key);
             let detachedProviderThreads: ReadonlyArray<OrchestrationV2ProviderThread> = [];
-            if (currentEntry?.supportsMultipleProviderThreads === true) {
-              const projection = yield* Effect.option(
-                projectionStore.getThreadRecords(input.threadId, [
-                  "providerThreads",
-                  "providerTurns",
-                ]),
-              );
+            if (
+              currentEntry !== undefined &&
+              (currentEntry.supportsMultipleProviderThreads || input.revokeMcpCredential === true)
+            ) {
+              const readProjection = projectionStore.getThreadRecords(input.threadId, [
+                "providerThreads",
+                "providerTurns",
+              ]);
+              const projection = yield* input.revokeMcpCredential === true
+                ? readProjection.pipe(Effect.asSome)
+                : Effect.option(readProjection);
               if (Option.isSome(projection)) {
                 const providerThreads = new Map(
                   projection.value.providerThreads
@@ -2304,7 +2308,7 @@ export const layerWithOptions = (
                   (turn) => turn.status === "running" && providerThreads.has(turn.providerThreadId),
                 );
                 yield* Effect.forEach(
-                  activeTurns,
+                  currentEntry.supportsMultipleProviderThreads ? activeTurns : [],
                   (turn) =>
                     currentEntry.exposedRuntime
                       .interruptTurn({
@@ -2381,7 +2385,14 @@ export const layerWithOptions = (
             if (Option.isSome(detachResult)) {
               yield* cancelIdleFiber(detachResult.value.idleUnloadFiber);
             }
-            const detached = Option.map(detachResult, (result) => result.entry);
+            const detached = Option.map(detachResult, (result) => result.entry).pipe(
+              // A failed terminal unload can retry after its attachment was removed.
+              Option.orElse(() =>
+                input.revokeMcpCredential === true
+                  ? Option.fromUndefinedOr(currentEntry)
+                  : Option.none(),
+              ),
+            );
             // Plain detaches deliberately do not revoke: a detached thread's
             // provider process may still be alive (shared multi-thread codex
             // session across a workspace handoff) and holds its MCP client's
@@ -2398,22 +2409,13 @@ export const layerWithOptions = (
             if (Option.isNone(detached)) {
               return;
             }
-            if (
-              detached.value.attachedThreadIds.size === 0 &&
-              !detached.value.supportsMultipleProviderThreads
-            ) {
-              yield* releaseEntry({
-                providerSessionId: input.providerSessionId,
-                reason: "manual_shutdown",
-                ...(input.detail === undefined ? {} : { detail: input.detail }),
-              });
-              return;
-            }
-            // The shared runtime stays up for other threads, so unload this
-            // thread's native state rather than leaving it (and its MCP
-            // servers) resident until the whole runtime is released.
+            // Shared runtimes unload only this thread. Terminal detaches also
+            // retire an exclusive runtime's durable ownership before closing it.
             const unloadThread = detached.value.exposedRuntime.unloadThread;
-            if (detached.value.supportsMultipleProviderThreads && unloadThread !== undefined) {
+            if (
+              unloadThread !== undefined &&
+              (detached.value.supportsMultipleProviderThreads || input.revokeMcpCredential === true)
+            ) {
               // Serialized with re-attachment: a thread whose next turn
               // attaches first stays loaded, and one that attaches during the
               // unload waits for it, so its resume reloads the native thread.
@@ -2430,26 +2432,42 @@ export const layerWithOptions = (
                   yield* Effect.forEach(
                     detachedProviderThreads.filter((thread) => thread.nativeThreadRef !== null),
                     (providerThread) =>
-                      unloadThread({ providerThread }).pipe(
+                      unloadThread({
+                        providerThread,
+                        reason: input.revokeMcpCredential === true ? "terminal" : "detach",
+                      }).pipe(
                         // Bounded so a wedged provider cannot hold up the
                         // thread's next attach.
                         Effect.timeout(UNLOAD_THREAD_TIMEOUT_MS),
                         Effect.catchCause((cause) =>
-                          Effect.logWarning(
-                            "orchestration-v2.driver-session.detach-unload-failed",
-                            {
-                              providerSessionId: input.providerSessionId,
-                              threadId: input.threadId,
-                              providerThreadId: providerThread.id,
-                              cause,
-                            },
-                          ),
+                          input.revokeMcpCredential === true
+                            ? Effect.failCause(cause)
+                            : Effect.logWarning(
+                                "orchestration-v2.driver-session.detach-unload-failed",
+                                {
+                                  providerSessionId: input.providerSessionId,
+                                  threadId: input.threadId,
+                                  providerThreadId: providerThread.id,
+                                  cause,
+                                },
+                              ),
                         ),
                       ),
                     { concurrency: 1, discard: true },
                   );
                 }),
               );
+            }
+            if (
+              detached.value.attachedThreadIds.size === 0 &&
+              !detached.value.supportsMultipleProviderThreads
+            ) {
+              yield* releaseEntry({
+                providerSessionId: input.providerSessionId,
+                reason: "manual_shutdown",
+                ...(input.detail === undefined ? {} : { detail: input.detail }),
+              });
+              return;
             }
             yield* scheduleIdleRelease(input.providerSessionId);
           }).pipe(

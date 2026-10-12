@@ -1,15 +1,17 @@
 import {
   EnvironmentId,
   ProjectId,
+  RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { Atom, AtomRegistry } from "effect/reactivity";
 import { describe, expect, it } from "vite-plus/test";
 
 import { PrimaryConnectionTarget } from "../connection/model.ts";
-import { v2ShellSnapshot, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
+import { v2Now, v2ShellSnapshot, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 import { applyShellStreamEvent } from "./shellReducer.ts";
 import { createEnvironmentThreadShellAtoms } from "./threadShell.ts";
 
@@ -221,5 +223,111 @@ describe("v2 thread shell lists", () => {
       disposeList();
       harness.registry.dispose();
     }
+  });
+});
+
+describe("descendant thread attention", () => {
+  const request = (
+    kind: NonNullable<OrchestrationV2ThreadShell["pendingRuntimeRequest"]>["kind"],
+  ) => ({
+    id: RuntimeRequestId.make(`request-${kind}`),
+    kind,
+    createdAt: v2Now,
+  });
+  const child = (
+    id: string,
+    kind: NonNullable<OrchestrationV2ThreadShell["pendingRuntimeRequest"]>["kind"] | null,
+    parentId = v2ThreadShell.id,
+  ): OrchestrationV2ThreadShell => ({
+    ...v2ThreadShell,
+    id: ThreadId.make(id),
+    title: id,
+    createdBy: "agent",
+    creationSource: "mcp",
+    lineage: {
+      ...v2ThreadShell.lineage,
+      parentThreadId: parentId,
+      relationshipToParent: "subagent",
+    },
+    pendingRuntimeRequest: kind === null ? null : request(kind),
+  });
+
+  it("surfaces app-owned descendant approvals and questions without unrelated or read-only chats", () => {
+    const { registry, threads, snapshotAtom } = makeHarness([environmentId, remoteEnvironmentId]);
+    const direct = child("direct", "user_input");
+    const nested = child("nested", "command", direct.id);
+    const native = { ...child("native", "permission"), creationSource: "provider" as const };
+    const fork = child("fork", "file-change");
+    registry.set(snapshotAtom(environmentId), {
+      ...v2ShellSnapshot,
+      threads: [
+        { ...v2ThreadShell, pendingRuntimeRequest: request("permission") },
+        direct,
+        nested,
+        native,
+        { ...fork, lineage: { ...fork.lineage, relationshipToParent: "fork" } },
+        child("auth", "auth_refresh"),
+        child("idle", null),
+        child("other-root", "command", ThreadId.make("unrelated")),
+      ],
+    });
+    registry.set(snapshotAtom(remoteEnvironmentId), {
+      ...v2ShellSnapshot,
+      threads: [child("remote", "command")],
+    });
+    const attention = registry.get(
+      threads.childThreadAttentionAtom({ environmentId, threadId: v2ThreadShell.id }),
+    );
+    expect(attention.map((thread) => thread.id)).toEqual([direct.id, nested.id]);
+    expect(
+      attention.map((thread) => [thread.hasPendingUserInput, thread.hasPendingApprovals]),
+    ).toEqual([
+      [true, false],
+      [false, true],
+    ]);
+    registry.dispose();
+  });
+
+  it("updates the indicator on request-kind changes and resolution while ignoring unrelated updates", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const question = child("child", "user_input");
+    const setChild = (value: OrchestrationV2ThreadShell) =>
+      registry.set(snapshotAtom(environmentId), {
+        ...v2ShellSnapshot,
+        threads: [v2ThreadShell, value],
+      });
+    setChild(question);
+    const atom = threads.childThreadAttentionAtom({ environmentId, threadId: v2ThreadShell.id });
+    const dispose = registry.mount(atom);
+    const initial = registry.get(atom);
+    setChild({ ...question, itemCount: 100 });
+    expect(registry.get(atom)).toBe(initial);
+    const approval = { ...question, pendingRuntimeRequest: request("file-change") };
+    setChild(approval);
+    const changed = registry.get(atom);
+    expect(changed).not.toBe(initial);
+    expect(changed[0]?.hasPendingApprovals).toBe(true);
+    expect(changed[0]?.hasPendingUserInput).toBe(false);
+    setChild({ ...approval, title: "New title" });
+    expect(registry.get(atom)[0]?.title).toBe("New title");
+    setChild({ ...approval, pendingRuntimeRequest: null });
+    expect(registry.get(atom)).toEqual([]);
+    dispose();
+    registry.dispose();
+  });
+
+  it("visits each descendant only once when malformed lineage contains a cycle", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const descendant = child("child", "permission");
+    registry.set(snapshotAtom(environmentId), {
+      ...v2ShellSnapshot,
+      threads: [child(v2ThreadShell.id, "command", descendant.id), descendant],
+    });
+    expect(
+      registry
+        .get(threads.childThreadAttentionAtom({ environmentId, threadId: v2ThreadShell.id }))
+        .map((thread) => thread.id),
+    ).toEqual([descendant.id]);
+    registry.dispose();
   });
 });

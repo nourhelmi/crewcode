@@ -3,6 +3,7 @@ import type { OrchestrationV2TurnItemStatus } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
   subagentGroupSummary,
+  subagentAttentionSummary,
   resolveSubagentMetadata,
   subagentDetailPreview,
 } from "./subagentDisplay.js";
@@ -162,5 +163,39 @@ describe("subagentDetailPreview", () => {
       subagentDetailPreview({ status: "failed", progress: "Last progress", result: " " }),
     ).toBe("Last progress");
     expect(subagentDetailPreview({ status: "pending" })).toBeNull();
+  });
+});
+
+describe("subagentAttentionSummary", () => {
+  it.each([
+    { approvals: [], expected: null },
+    {
+      approvals: [false],
+      expected: { label: "Subagent needs input", actionLabel: "Open question" },
+    },
+    {
+      approvals: [true],
+      expected: { label: "Subagent needs approval", actionLabel: "Open approval" },
+    },
+    {
+      approvals: [false, false],
+      expected: { label: "2 subagents need input", actionLabel: "Open question" },
+    },
+    {
+      approvals: [true, true],
+      expected: { label: "2 subagents need approval", actionLabel: "Open approval" },
+    },
+    {
+      approvals: [true, false],
+      expected: { label: "2 subagents need attention", actionLabel: "Open approval" },
+    },
+    {
+      approvals: [false, true],
+      expected: { label: "2 subagents need attention", actionLabel: "Open question" },
+    },
+  ])("presents $approvals consistently on web and mobile", ({ approvals, expected }) => {
+    expect(
+      subagentAttentionSummary(approvals.map((hasPendingApprovals) => ({ hasPendingApprovals }))),
+    ).toEqual(expected);
   });
 });

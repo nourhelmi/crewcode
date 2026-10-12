@@ -139,9 +139,9 @@ export function createEnvironmentThreadShellAtoms(input: {
     }).pipe(Atom.withLabel(`environment-thread-shell:${key}`));
   });
 
-  // Child questions are hidden with their sidebar rows. Read their shell summaries,
+  // Child requests are hidden with their sidebar rows. Read their shell summaries,
   // without subscribing to every child transcript.
-  const childThreadInputsAtomFamily = Atom.family((key: string) => {
+  const childThreadAttentionAtomFamily = Atom.family((key: string) => {
     const ref = parseThreadKey(key);
     let previous: ReadonlyArray<EnvironmentThreadShell> = [];
     return Atom.make((get) => {
@@ -162,25 +162,30 @@ export function createEnvironmentThreadShellAtoms(input: {
           seen.add(child.id);
           pending.push(child.id);
           if (
-            child.pendingRuntimeRequest?.kind === "user_input" &&
+            child.pendingRuntimeRequest !== null &&
+            child.pendingRuntimeRequest.kind !== "auth_refresh" &&
             !isProviderNativeSubagentThread(child)
           ) {
             next.push(scopedThread(ref.environmentId, child));
           }
         }
       }
-      // Indicators read only ids and titles, so other shell updates keep the old array.
+      // Keep unrelated shell updates from repainting the parent indicator.
       if (
         previous.length === next.length &&
         previous.every(
-          (thread, index) => thread.id === next[index]?.id && thread.title === next[index]?.title,
+          (thread, index) =>
+            thread.id === next[index]?.id &&
+            thread.title === next[index]?.title &&
+            thread.hasPendingApprovals === next[index]?.hasPendingApprovals &&
+            thread.hasPendingUserInput === next[index]?.hasPendingUserInput,
         )
       ) {
         return previous;
       }
       previous = next;
       return next;
-    }).pipe(Atom.withLabel(`environment-child-thread-inputs:${key}`));
+    }).pipe(Atom.withLabel(`environment-child-thread-attention:${key}`));
   });
 
   const threadShellsForProjectRefsAtomFamily = Atom.family((key: string) => {
@@ -270,6 +275,7 @@ export function createEnvironmentThreadShellAtoms(input: {
     threadShellsForProjectRefsAtom: (refs: ReadonlyArray<ScopedProjectRef>) =>
       threadShellsForProjectRefsAtomFamily(projectRefCollectionKey(refs)),
     threadShellAtom: (ref: ScopedThreadRef) => threadShellAtomFamily(threadKey(ref)),
-    childThreadInputsAtom: (ref: ScopedThreadRef) => childThreadInputsAtomFamily(threadKey(ref)),
+    childThreadAttentionAtom: (ref: ScopedThreadRef) =>
+      childThreadAttentionAtomFamily(threadKey(ref)),
   };
 }

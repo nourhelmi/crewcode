@@ -1,3 +1,8 @@
+import {
+  crewProcessEnvironment,
+  crewThreadEnvironment,
+} from "../../provider/CrewNativeEnvironment.ts";
+import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as CrewNativeRuntime from "../../provider/CrewNativeRuntime.ts";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -3347,6 +3352,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   adapterOptions: ClaudeAdapterV2Options,
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const crewInvocation = yield* resolveSelfInvocation();
   const { attachmentsDir, fileSystem, path, crypto, idAllocator, queryRunner } = adapterOptions;
   const crewSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   // Subagent model names and effort levels, including the instance's custom models.
@@ -3388,6 +3394,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
     openSession: Effect.fn("ClaudeAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
         const sessionScope = yield* Effect.scope;
+        const sessionEnvironment = crewProcessEnvironment(
+          adapterOptions.environment,
+          input.runtimePolicy.crew,
+        );
         const now = yield* DateTime.now;
         const session = providerSession({
           providerSessionId: input.providerSessionId,
@@ -3684,7 +3694,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const crew = yield* CrewNativeRuntime.make({
           host: "claude",
           driver: CLAUDE_PROVIDER,
-          environment: adapterOptions.environment,
+          environment: sessionEnvironment,
           emit: emitProviderEvent,
         }).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -8212,8 +8222,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           nativeThreadId: string,
         ) {
           const queryPolicy = claudeRuntimeQueryPolicyForRuntimePolicy(turnInput.runtimePolicy);
+          const mcpSession = yield* mcpSessions.read(turnInput.threadId);
           const mcpOverrides = claudeMcpQueryOverrides({
-            mcpSession: yield* mcpSessions.read(turnInput.threadId),
+            mcpSession,
             readOnlySandbox:
               sandboxPolicyKindForClaudeRuntimePolicy(turnInput.runtimePolicy) === "readOnly",
             ...(queryPolicy.allowedTools === undefined
@@ -8297,7 +8308,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             cwd: turnInput.runtimePolicy.cwd,
             attachmentsDir,
             settings: adapterOptions.settings,
-            environment: adapterOptions.environment,
+            environment: {
+              ...crewProcessEnvironment(adapterOptions.environment, turnInput.runtimePolicy.crew),
+              ...crewThreadEnvironment({
+                environment: sessionEnvironment,
+                crew: turnInput.runtimePolicy.crew,
+                mcpSession,
+                invocation: crewInvocation,
+              }),
+            },
             tools: queryPolicy.tools ?? CLAUDE_CODE_PRESET_TOOLS,
             ...(mcpOverrides.allowedTools === undefined
               ? {}
@@ -9006,12 +9025,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               );
             }),
           interruptTurn,
-          unloadThread: ({ providerThread }) =>
+          unloadThread: ({ providerThread, reason }) =>
             Effect.gen(function* () {
               const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
               if (!nativeThreadId) return;
+              if (reason === "terminal") yield* crew.stop(nativeThreadId);
               yield* closeLiveQueryForNativeThread(nativeThreadId);
-              yield* crew.stop(nativeThreadId);
             }).pipe(
               Effect.mapError(
                 (cause) =>

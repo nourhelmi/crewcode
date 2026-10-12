@@ -162,6 +162,7 @@ interface TestProviderRuntimeState {
   readonly interruptCount: number;
   readonly resumeCount: number;
   readonly unloadedNativeThreadIds: ReadonlyArray<string>;
+  readonly unloadReasons: ReadonlyArray<"idle" | "detach" | "terminal" | undefined>;
   readonly eventQueues: ReadonlyMap<
     string,
     Queue.Queue<ProviderAdapter.ProviderAdapterV2Event, Cause.Done>
@@ -174,6 +175,7 @@ const emptyState: TestProviderRuntimeState = {
   interruptCount: 0,
   resumeCount: 0,
   unloadedNativeThreadIds: [],
+  unloadReasons: [],
   eventQueues: new Map(),
 };
 
@@ -421,11 +423,12 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
               ...current,
               interruptCount: current.interruptCount + 1,
             })),
-          unloadThread: ({ providerThread }) =>
+          unloadThread: ({ providerThread, reason }) =>
             (options.beforeUnload ?? Effect.void).pipe(
               Effect.andThen(
                 Ref.update(state, (current) => ({
                   ...current,
+                  unloadReasons: [...current.unloadReasons, reason],
                   unloadedNativeThreadIds: [
                     ...current.unloadedNativeThreadIds,
                     providerThread.nativeThreadRef?.nativeId ?? "",
@@ -2614,8 +2617,19 @@ it.effect("ProviderSessionManagerV2 terminal detach revokes the thread's MCP cre
         threadId,
       });
 
+      const providerThread = makeProviderThread({ idAllocator, threadId, providerSessionId, now });
       yield* eventSink.write({
-        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator, threadId, now }),
+          {
+            id: yield* idAllocator.allocate.event({ threadId }),
+            type: "provider-thread.updated",
+            threadId,
+            driver: CODEX_DRIVER,
+            occurredAt: now,
+            payload: providerThread,
+          },
+        ],
       });
       yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
       const issued = (yield* Ref.get(mcpConfigs)).at(-1);
@@ -2632,6 +2646,9 @@ it.effect("ProviderSessionManagerV2 terminal detach revokes the thread's MCP cre
       });
       assert.isUndefined(yield* registry.resolve(token!));
       assert.isUndefined(yield* mcpSessions.read(threadId));
+      assert.deepEqual((yield* Ref.get(state)).unloadReasons, ["terminal"]);
+      assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
+      assert.equal((yield* Ref.get(state)).closeCount, 0);
     });
 
     yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1_000, mcpConfigs })));
@@ -4231,6 +4248,7 @@ it.effect(
         // The runtime stays up for the second thread; the first thread's
         // native state is unloaded after its turn is interrupted.
         assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
+        assert.deepEqual((yield* Ref.get(state)).unloadReasons, ["detach"]);
 
         yield* manager.detach({ providerSessionId, threadId: secondThreadId });
         yield* TestClock.adjust("1 second");
@@ -4509,6 +4527,7 @@ it.effect(
           yield* endTurn(threadA, 2);
           yield* TestClock.adjust("1 second");
           assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, [`native-${threadA}`]);
+          assert.deepEqual((yield* Ref.get(state)).unloadReasons, ["idle"]);
           assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
           assert.equal((yield* Ref.get(state)).closeCount, 0);
 
@@ -4721,5 +4740,68 @@ it.effect(
         projectExists: false,
       });
       assert.isFalse(denied?.capabilities?.has("device"));
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 retries terminal cleanup before releasing an exclusive runtime",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const failUnload = yield* Ref.make(true);
+      const beforeUnload = Effect.gen(function* () {
+        if (yield* Ref.getAndSet(failUnload, false))
+          return yield* Effect.die("terminal cleanup failed");
+      });
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("exclusive-terminal-cleanup");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator, threadId, now }),
+            {
+              id: yield* idAllocator.allocate.event({ threadId }),
+              type: "provider-thread.updated",
+              threadId,
+              driver: CODEX_DRIVER,
+              occurredAt: now,
+              payload: providerThread,
+            },
+          ],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const detach = manager.detach({ providerSessionId, threadId, revokeMcpCredential: true });
+        assert.isTrue(Exit.isFailure(yield* Effect.exit(detach)));
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
+        // The first attempt removed the attachment. Retry still owns cleanup of this runtime.
+        yield* detach;
+        assert.deepEqual((yield* Ref.get(state)).unloadReasons, ["terminal"]);
+        assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+        assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            capabilities: ExclusiveCapabilities,
+            beforeUnload,
+          }),
+        ),
+      );
     }),
 );

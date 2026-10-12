@@ -183,6 +183,12 @@ export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")
     }
   }
 
+  effects.push({
+    id: `effect:${command.commandId}:delegated-tasks.stop`,
+    commandId: command.commandId,
+    threadId: command.threadId,
+    request: { type: "delegated-tasks.stop", reason: "Parent thread deleted." },
+  });
   for (const session of projection.providerSessions) {
     if (session.status === "stopped" || session.status === "error") continue;
     yield* emitEvent({

@@ -30,6 +30,7 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as CrewNativeControl from "../provider/CrewNativeControl.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -961,4 +962,120 @@ it.effect.each([
 
     expect(dispatched).toEqual(settles ? ["thread.settle"] : []);
   }),
+);
+
+it.effect.each([false, true])(
+  "records human Crew amendments before native dispatch (attachmentOnly=%s)",
+  (attachmentOnly) => {
+    const threadId = ThreadId.make("thread:crew-composer");
+    const instanceId = ProviderInstanceId.make("codex");
+    const commandId = CommandId.make("command:crew-composer");
+    const calls: string[] = [];
+    const amendments: Array<{ requestId: string; text: string }> = [];
+    let failAmend = false;
+    const projection = {
+      runs: [],
+      runtimeRequests: [],
+      providerThreads: [],
+      thread: {
+        id: threadId,
+        projectId: ProjectId.make("project:crew-composer"),
+        deletedAt: null,
+        providerInstanceId: instanceId,
+        modelSelection: { instanceId, model: "test" },
+        crew: { runId: "worker", home: "/isolated" },
+      },
+    } as unknown as OrchestrationV2ThreadProjection;
+    const layer = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadRecords: () => Effect.succeed(projection),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                calls.push(command.type);
+                return { sequence: 1, storedEvents: [] } as never;
+              }),
+          }),
+          Layer.mock(CrewNativeControl.CrewNativeControl)({
+            amend: (input) =>
+              Effect.suspend(() => {
+                calls.push("amend");
+                amendments.push(input);
+                return failAmend
+                  ? Effect.fail(
+                      new CrewNativeControl.CrewNativeControlError({
+                        runId: "worker",
+                        operation: "amend",
+                      }),
+                    )
+                  : Effect.void;
+              }),
+            retire: () =>
+              Effect.sync(() => {
+                calls.push("retire");
+              }),
+          }),
+          ServerSettings.layerTest(),
+          layerReceiptsTest,
+        ),
+      ),
+    );
+    return Effect.gen(function* () {
+      const service = yield* ThreadManagementService.ThreadManagementService;
+      const command = {
+        type: "message.dispatch",
+        commandId,
+        threadId,
+        messageId: MessageId.make("message:crew-composer"),
+        text: attachmentOnly ? "" : "Revise the scope",
+        attachments: attachmentOnly
+          ? [
+              {
+                type: "file",
+                id: "file",
+                name: "input.txt",
+                mimeType: "text/plain",
+                sizeBytes: 5,
+              },
+            ]
+          : [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      } as const;
+      yield* service.dispatch(command);
+      expect(calls).toEqual(["amend", "message.dispatch"]);
+      expect(amendments[0]?.requestId).toBe(commandId);
+      expect(amendments[0]?.text).toBe(
+        attachmentOnly
+          ? "Human follow-up with 1 attached file(s); inspect the attachments in this native chat."
+          : command.text,
+      );
+      calls.length = 0;
+      failAmend = true;
+      yield* service.dispatch(command).pipe(Effect.flip);
+      expect(calls).toEqual(["amend"]);
+      calls.length = 0;
+      for (const type of ["thread.stop", "thread.archive", "thread.delete"] as const) {
+        yield* service.dispatch({ type, threadId, commandId: CommandId.make(`command:${type}`) });
+        yield* service.dispatch({ type, threadId, commandId: CommandId.make(`command:${type}`) });
+      }
+      expect(calls).toEqual([
+        "thread.stop",
+        "retire",
+        "thread.stop",
+        "retire",
+        "thread.archive",
+        "retire",
+        "thread.archive",
+        "retire",
+        "thread.delete",
+        "retire",
+        "thread.delete",
+        "retire",
+      ]);
+    }).pipe(Effect.provide(layer));
+  },
 );

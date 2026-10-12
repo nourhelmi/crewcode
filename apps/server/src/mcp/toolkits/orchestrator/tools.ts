@@ -34,6 +34,7 @@ import {
 import { Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
 
+import * as CrewWorkerService from "../../CrewWorkerService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
@@ -75,6 +76,22 @@ export const DelegateTaskTool = Tool.make("delegate_task", {
   .annotate(Tool.Title, "Delegate a child task")
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
+
+const CrewWorkerTool = Tool.make("crew_worker", {
+  description:
+    "Private native execution boundary for Crew. Start, inspect, resume, or stop a Crew run already reserved in the configured Crew home. Ownership, route, prompt and workspace are read from the run metadata; callers cannot override them. Resume requires a stable requestId. Crew owns result delivery.",
+  parameters: CrewWorkerService.CrewWorkerInput,
+  success: CrewWorkerService.CrewWorkerResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+    CrewWorkerService.CrewWorkerService,
+  ],
+})
+  .annotate(Tool.Title, "Manage native Crew worker")
+  .annotate(Tool.Destructive, true);
 
 const TaskStatusTool = Tool.make("task_status", {
   description:
@@ -275,6 +292,7 @@ const ThreadInterruptTool = Tool.make("t3_thread_interrupt", {
 export const OrchestratorToolkit = Toolkit.make(
   OrchestratorCapabilitiesTool,
   DelegateTaskTool,
+  CrewWorkerTool,
   TaskStatusTool,
   TaskCancelTool,
   WorkflowStopTool,

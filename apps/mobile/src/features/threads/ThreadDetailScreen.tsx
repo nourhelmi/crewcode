@@ -1,5 +1,6 @@
+import { subagentAttentionSummary } from "@t3tools/client-runtime/state/subagent-display";
 import { useAtomValue } from "@effect/atom-react";
-import { useChildThreadInputs, useThreadReportedModelSelection } from "../../state/entities";
+import { useChildThreadAttention, useThreadReportedModelSelection } from "../../state/entities";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
 import { useNavigation } from "@react-navigation/native";
 import type { WorktreeSetupCardProps } from "./worktree-setup-card";
@@ -406,7 +407,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const controlInsets = deriveBottomControlInsets(nativeMetrics);
   const agentLabel = `${props.selectedThread.modelSelection.instanceId} agent`;
   const selectedThreadKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
-  const childThreadInputs = useChildThreadInputs({
+  const childThreadAttention = useChildThreadAttention({
     environmentId: props.environmentId,
     threadId: props.selectedThread.id,
   });
@@ -517,15 +518,13 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     if (threadSyncLabel !== null) {
       return { kind: "syncing", label: threadSyncLabel };
     }
-    const childInput = childThreadInputs[0];
-    if (childInput && contentPresentationKind === "ready") {
+    const childInput = childThreadAttention[0];
+    const attention = subagentAttentionSummary(childThreadAttention);
+    if (childInput && attention && contentPresentationKind === "ready") {
       return {
         kind: "child-input",
-        label:
-          childThreadInputs.length === 1
-            ? "Subagent needs input"
-            : `${childThreadInputs.length} subagents need input`,
-        accessibilityLabel: `Open question from ${childInput.title}`,
+        label: attention.label,
+        accessibilityLabel: `${attention.actionLabel} from ${childInput.title}`,
         onPress: () => {
           Keyboard.dismiss();
           navigation.navigate("Thread", {

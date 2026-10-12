@@ -28,6 +28,21 @@ describe("summarizeT3ToolCalls", () => {
     ).toBe("Created 1 thread");
   });
 
+  it("summarizes Crew controls without claiming workers started or stopped", () => {
+    expect(
+      summarizeT3ToolCalls("crew-worker", [
+        completed({ action: "start", runId: "crew-1" }),
+        completed({ action: "status", runId: "crew-1" }),
+        completed({ action: "stop", runId: "crew-2" }),
+      ]),
+    ).toEqual({ label: "Managed 2 Crew workers", failedCount: 0 });
+    expect(
+      summarizeT3ToolCalls("crew-worker", [
+        { input: { action: "resume", runId: "crew-1" }, output: undefined, outcome: "failed" },
+      ]),
+    ).toEqual({ label: "Tried to manage 1 Crew worker", failedCount: 1 });
+  });
+
   it("reports review guides by outcome, and a call where none started as a failure", () => {
     const guides = (...outcomes: ReadonlyArray<string>) => ({
       guides: outcomes.map((outcome, index) => ({ number: index + 1, outcome })),

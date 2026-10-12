@@ -1,3 +1,4 @@
+import * as CrewNativeControl from "../provider/CrewNativeControl.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
@@ -240,6 +241,7 @@ const layerAgentSessionImporterProvided = AgentSessionImporter.layer.pipe(
 );
 
 const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImporter.pipe(
+  Layer.provide(CrewNativeControl.layer),
   Layer.provide(
     Layer.mergeAll(
       layerOrchestratorProvided,

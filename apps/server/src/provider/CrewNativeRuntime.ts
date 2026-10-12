@@ -21,6 +21,7 @@ import * as Path from "effect/Path";
 const SafeId = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9_-]{1,160}$/));
 const Run = Schema.Struct({
   id: SafeId,
+  launcher: Schema.optional(Schema.String),
   name: Schema.String,
   role: Schema.String,
   cwd: Schema.String,
@@ -129,7 +130,7 @@ export class CrewNativeRuntime extends Context.Service<
   }
 >()("t3/provider/CrewNativeRuntime") {}
 
-/** The native provider remains the root. Crew rows are external work, never native subagents. */
+/** Crew owns settlement; only legacy external workers need synthetic activity rows. */
 export const make = Effect.fn("CrewNativeRuntime.make")(function* (options: {
   readonly host: "codex" | "claude";
   readonly driver: ProviderDriverKind;
@@ -162,7 +163,8 @@ export const make = Effect.fn("CrewNativeRuntime.make")(function* (options: {
   // An old run's parent is immutable. Read historical metadata once, then only new and owned runs.
   const known = new Map<string, Run>();
   const lock = yield* Semaphore.make(1);
-  const mailbox = (id: string) => `${options.host}-${id}`;
+  const ownRunId = options.environment.CREW_RUN || undefined;
+  const mailbox = (id: string) => ownRunId ?? `${options.host}-${id}`;
   const owned = (all: ReadonlyArray<Run>, parent: string) => {
     const parents = new Set([parent]);
     const result: Run[] = [];
@@ -212,6 +214,7 @@ export const make = Effect.fn("CrewNativeRuntime.make")(function* (options: {
     return owned([...known.values()], parent);
   });
   const project = Effect.fnUntraced(function* (candidate: Watched, run: Run) {
+    if (run.launcher === "t3") return;
     const previous = cards.get(run.id);
     const root = previous && !previous.terminal ? previous.root : candidate;
     if (
@@ -332,13 +335,23 @@ export const make = Effect.fn("CrewNativeRuntime.make")(function* (options: {
     // A launch still awaiting routing cannot reserve after this fence; later prompts may spawn afresh.
     const exitCode = yield* spawner
       .exitCode(
-        ChildProcess.make(command, ["stop", "--children-of", parent], {
-          env: { ...options.environment, CREW_HOME: home, CREW_NO_DELEGATE: "1" },
-          extendEnv: false,
-          stdin: "ignore",
-          stdout: "ignore",
-          stderr: "ignore",
-        }),
+        ChildProcess.make(
+          command,
+          ownRunId ? ["stop", ownRunId] : ["stop", "--children-of", parent],
+          {
+            env: {
+              ...options.environment,
+              CREW_HOME: home,
+              CREW_NO_DELEGATE: "1",
+              CREW_T3_STOP_OWNED: "1",
+              CREW_T3_STOP_CONFIRMED: "",
+            },
+            extendEnv: false,
+            stdin: "ignore",
+            stdout: "ignore",
+            stderr: "ignore",
+          },
+        ),
       )
       .pipe(
         Effect.timeout("45 seconds"),
@@ -420,9 +433,12 @@ export const make = Effect.fn("CrewNativeRuntime.make")(function* (options: {
           : roots.get(id)?.pending === true,
       ),
     stop: (id) => lock.withPermits(1)(stop(id)),
+    // An idle native worker may be unloaded and resumed in the same retained chat.
+    // Explicit Stop/interrupt retires its Crew run; routine runtime release does not.
     close: Effect.gen(function* () {
       const failures: CrewStopError[] = [];
-      for (const id of roots.keys())
+      for (const [id, root] of roots) {
+        if (!root.active && !root.pending) continue;
         yield* lock
           .withPermits(1)(stop(id))
           .pipe(
@@ -433,6 +449,7 @@ export const make = Effect.fn("CrewNativeRuntime.make")(function* (options: {
                 }),
             }),
           );
+      }
       if (failures.length > 0)
         return yield* new CrewStopError({
           mailbox: failures.map((error) => error.mailbox).join(", "),

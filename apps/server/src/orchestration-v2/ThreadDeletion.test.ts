@@ -284,6 +284,7 @@ it.effect("queues provider and resource cleanup and preserves an earlier deletio
     assert.deepEqual(
       plan.effects.map((effect) => effect.request),
       [
+        { type: "delegated-tasks.stop", reason: "Parent thread deleted." },
         {
           type: "provider-session.detach",
           providerSessionId: ProviderSessionId.make("session:delete-plan:running"),

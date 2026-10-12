@@ -1,3 +1,8 @@
+import {
+  crewProcessEnvironment,
+  crewThreadEnvironment,
+} from "../../provider/CrewNativeEnvironment.ts";
+import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as CrewNativeRuntime from "../../provider/CrewNativeRuntime.ts";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
@@ -1304,6 +1309,7 @@ export const CODEX_THREAD_CONFIG = { "tools.update_plan.enabled": true } as cons
 export function codexThreadRuntimeParams(input: {
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
   readonly modelSelection?: { readonly model: string };
+  readonly crewEnvironment?: Readonly<Record<string, string>>;
   readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
 }): {
   readonly cwd?: string;
@@ -1316,6 +1322,9 @@ export function codexThreadRuntimeParams(input: {
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      ...(input.crewEnvironment === undefined || Object.keys(input.crewEnvironment).length === 0
+        ? {}
+        : { "shell_environment_policy.set": input.crewEnvironment }),
       ...(mcpSession === undefined
         ? {}
         : {
@@ -1696,6 +1705,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const crewSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crewPath = yield* Path.Path;
+  const crewInvocation = yield* resolveSelfInvocation();
   const continuationRequests = adapterOptions.continuationRequests;
 
   return ProviderAdapter.ProviderAdapterV2.of({
@@ -1719,13 +1729,27 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     }),
                 ),
               );
+        const sessionEnvironment = crewProcessEnvironment(
+          resolvedRuntime?.environment ?? adapterOptions.environment,
+          input.runtimePolicy.crew,
+        );
+        const crewEnvironmentFor = (
+          mcpSession: McpProviderSession.McpProviderSessionConfig | undefined,
+          runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy | undefined,
+        ) =>
+          crewThreadEnvironment({
+            environment: sessionEnvironment,
+            crew: runtimePolicy?.crew,
+            mcpSession,
+            invocation: crewInvocation,
+          });
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
           providerSessionId: input.providerSessionId,
           runtimePolicy: input.runtimePolicy,
           settings: resolvedRuntime?.config ?? adapterOptions.settings,
-          environment: resolvedRuntime?.environment ?? adapterOptions.environment,
+          environment: sessionEnvironment,
         });
         const additionalContextByThread = yield* Ref.make(
           new Map<
@@ -1912,7 +1936,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const crew = yield* CrewNativeRuntime.make({
           host: "codex",
           driver: CODEX_PROVIDER,
-          environment: adapterOptions.environment,
+          environment: sessionEnvironment,
           emit: emitProviderEvent,
         }).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -6527,6 +6551,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   "thread/start",
                   codexThreadRuntimeParams({
                     mcpSession,
+                    crewEnvironment: crewEnvironmentFor(mcpSession, threadInput.runtimePolicy),
                     modelSelection: threadInput.modelSelection,
                     runtimePolicy: threadInput.runtimePolicy,
                   }),
@@ -6555,13 +6580,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
               // excludeTurns is not in the generated request schema yet.
+              const mcpSession = yield* readMcpSession(
+                threadInput.threadId ?? threadInput.providerThread.appThreadId,
+              );
               const resume = client.raw.request("thread/resume", {
                 threadId: nativeThreadId,
                 excludeTurns: true,
                 ...codexThreadRuntimeParams({
-                  mcpSession: yield* readMcpSession(
-                    threadInput.threadId ?? threadInput.providerThread.appThreadId,
-                  ),
+                  mcpSession,
+                  crewEnvironment: crewEnvironmentFor(mcpSession, threadInput.runtimePolicy),
                   ...(threadInput.modelSelection === undefined
                     ? {}
                     : { modelSelection: threadInput.modelSelection }),
@@ -6744,8 +6771,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           unloadThread: (unloadInput) =>
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(unloadInput.providerThread);
+              if (unloadInput.reason === "terminal") yield* crew.stop(nativeThreadId);
               yield* client.request("thread/unsubscribe", { threadId: nativeThreadId });
-              yield* crew.stop(nativeThreadId);
             }).pipe(
               Effect.mapError((cause) =>
                 cause._tag === "ProviderAdapterProtocolError"
@@ -7290,11 +7317,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               // process. After a restart or idle release, load it the same way
               // the next turn would before reverting.
               if (!loaded) {
+                const mcpSession = yield* readMcpSession(threadInput.providerThread.appThreadId);
                 yield* client.raw.request("thread/resume", {
                   threadId,
                   excludeTurns: true,
                   ...codexThreadRuntimeParams({
-                    mcpSession: yield* readMcpSession(threadInput.providerThread.appThreadId),
+                    mcpSession,
+                    crewEnvironment: crewEnvironmentFor(mcpSession, input.runtimePolicy),
                     modelSelection: input.modelSelection,
                     runtimePolicy: input.runtimePolicy,
                   }),
@@ -7335,6 +7364,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             Effect.gen(function* () {
               const threadId = yield* getNativeThreadId(threadInput.sourceProviderThread);
               const boundary = yield* resolveCodexForkBoundary(threadInput);
+              const mcpSession = yield* mcpSessions.read(threadInput.targetThreadId);
               const response = yield* ensureInitialized.pipe(
                 Effect.andThen(
                   client.request("thread/fork", {
@@ -7343,7 +7373,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                       ? {}
                       : { lastTurnId: boundary.lastTurnId }),
                     ...codexThreadRuntimeParams({
-                      mcpSession: yield* mcpSessions.read(threadInput.targetThreadId),
+                      mcpSession,
+                      crewEnvironment: crewEnvironmentFor(mcpSession, threadInput.runtimePolicy),
                       ...(threadInput.modelSelection === undefined
                         ? {}
                         : { modelSelection: threadInput.modelSelection }),

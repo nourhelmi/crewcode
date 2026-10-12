@@ -17,7 +17,11 @@ import * as Schema from "effect/Schema";
 import * as CrewNativeRuntime from "./CrewNativeRuntime.ts";
 
 const encode = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
-const fixture = Effect.fnUntraced(function* (host: "codex" | "claude" = "codex", enabled = true) {
+const fixture = Effect.fnUntraced(function* (
+  host: "codex" | "claude" = "codex",
+  enabled = true,
+  ownRunId?: string,
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-crew-native-" });
@@ -30,13 +34,15 @@ const fixture = Effect.fnUntraced(function* (host: "codex" | "claude" = "codex",
 import fs from 'node:fs'; import path from 'node:path';
 const home=process.env.CREW_HOME;
 const runs=path.join(home,'runs');
-const parent=process.argv[4];
+const own=process.argv[3]!=='--children-of';
+const parent=own?process.argv[3]:process.argv[4];
 fs.appendFileSync(path.join(home,'calls'),parent+'\\n');
+if(process.env.CREW_T3_STOP_OWNED!=='1') process.exit(9);
 if(fs.existsSync(path.join(home,'fail')) || fs.existsSync(path.join(home,'fail-'+parent))) process.exit(2);
 const read=()=>(fs.existsSync(runs)?fs.readdirSync(runs):[]).map(name=>[name,JSON.parse(fs.readFileSync(path.join(runs,name,'meta.json'),'utf8'))]);
 const stop=(id)=>{const p=path.join(runs,id,'meta.json'); const r=JSON.parse(fs.readFileSync(p,'utf8')); r.state='stopped'; fs.writeFileSync(p,JSON.stringify(r)); for(const [name,child] of read()) if(child.parent.mailbox===id)stop(name);};
 if(fs.existsSync(path.join(home,'late'))){fs.unlinkSync(path.join(home,'late')); const r=read().find(([,r])=>r.parent.mailbox===parent)[1]; r.id='late'; r.state='running'; fs.mkdirSync(path.join(runs,'late')); fs.writeFileSync(path.join(runs,'late','meta.json'),JSON.stringify(r));}
-for(const [id,r] of read()) if(r.parent.mailbox===parent)stop(id);
+if(own)stop(parent); else for(const [id,r] of read()) if(r.parent.mailbox===parent)stop(id);
 `,
   );
   yield* fs.chmod(command, 0o700);
@@ -44,7 +50,11 @@ for(const [id,r] of read()) if(r.parent.mailbox===parent)stop(id);
   const runtime = yield* CrewNativeRuntime.make({
     host,
     driver: ProviderDriverKind.make(host === "claude" ? "claudeAgent" : "codex"),
-    environment: { CREW_HOME: home, ...(enabled ? { CREWCODE_CREW_BIN: command } : {}) },
+    environment: {
+      CREW_HOME: home,
+      ...(ownRunId ? { CREW_RUN: ownRunId } : {}),
+      ...(enabled ? { CREWCODE_CREW_BIN: command } : {}),
+    },
     emit: (event) =>
       Effect.sync(() => {
         events.push(event);
@@ -98,6 +108,61 @@ const test = <A, E, R>(body: () => Effect.Effect<A, E, R>) =>
   Effect.scoped(body()).pipe(Effect.provide(NodeServices.layer));
 
 describe("native Crew worker boundary", () => {
+  it.effect("idle root release preserves settled native children for later follow-ups", () =>
+    test(() =>
+      Effect.gen(function* () {
+        const h = yield* fixture();
+        yield* h.write("retained", "codex-native-root", { launcher: "t3", state: "done" });
+        yield* h.runtime.observe(h.root());
+        yield* h.runtime.finish("native-root", h.root().providerTurnId);
+        yield* h.runtime.close;
+        assert.isFalse(yield* h.fs.exists(h.path.join(h.home, "calls")));
+        yield* h.runtime.stop("native-root");
+        assert.isTrue(yield* h.fs.exists(h.path.join(h.home, "calls")));
+      }),
+    ),
+  );
+
+  it.effect(
+    "child Stop uses its Crew run ancestry while idle release preserves retained workers",
+    () =>
+      test(() =>
+        Effect.gen(function* () {
+          const h = yield* fixture("codex", true, "advisor");
+          yield* h.write("advisor", "codex-lead", { launcher: "t3" });
+          yield* h.write("builder", "advisor", { launcher: "t3" });
+          yield* h.runtime.observe(h.root());
+          assert.isTrue(yield* h.runtime.pending("native-root"));
+          yield* h.write("builder", "advisor", { launcher: "t3", state: "done" });
+          yield* h.runtime.finish("native-root", h.root().providerTurnId);
+          yield* h.runtime.close;
+          assert.isFalse(yield* h.fs.exists(h.path.join(h.home, "calls")));
+          yield* h.runtime.stop("native-root");
+          assert.equal(yield* h.fs.readFileString(h.path.join(h.home, "calls")), "advisor\n");
+          assert.isFalse(yield* h.runtime.pending("native-root"));
+          const meta = yield* h.fs.readFileString(
+            h.path.join(h.home, "runs", "advisor", "meta.json"),
+          );
+          assert.include(meta, '"state":"stopped"');
+        }),
+      ),
+  );
+
+  it.effect("native workers keep Crew settlement without duplicate external activity cards", () =>
+    test(() =>
+      Effect.gen(function* () {
+        const h = yield* fixture();
+        yield* h.write("native", "codex-native-root", { launcher: "t3" });
+        yield* h.runtime.observe(h.root());
+        assert.equal(h.items().length, 0);
+        assert.isTrue(yield* h.runtime.pending("native-root"));
+        yield* h.runtime.stop("native-root");
+        assert.isFalse(yield* h.runtime.pending("native-root"));
+        assert.equal(h.items().length, 0);
+      }),
+    ),
+  );
+
   it.effect("disabled and missing Crew state leave ordinary providers alone", () =>
     test(() =>
       Effect.gen(function* () {

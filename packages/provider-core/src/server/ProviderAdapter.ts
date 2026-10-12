@@ -6,6 +6,7 @@ import {
   ModelSelection,
   NodeId,
   OrchestrationV2AppThread,
+  OrchestrationV2CrewBinding,
   OrchestrationV2ConversationMessage,
   OrchestrationV2ExecutionNode,
   OrchestrationV2ProviderSession,
@@ -51,6 +52,7 @@ export const ProviderAdapterV2RuntimePolicy = Schema.Struct({
   approvalPolicy: Schema.optional(Schema.Unknown),
   sandboxPolicy: Schema.optional(Schema.Unknown),
   reasoningEffort: Schema.optional(Schema.String),
+  crew: Schema.optional(OrchestrationV2CrewBinding),
 });
 export type ProviderAdapterV2RuntimePolicy = typeof ProviderAdapterV2RuntimePolicy.Type;
 
@@ -614,6 +616,8 @@ export interface ProviderAdapterV2SessionRuntime {
    */
   readonly unloadThread?: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
+    /** Only terminal detaches retire durable worker ownership; idle release must preserve it. */
+    readonly reason?: "idle" | "detach" | "terminal";
   }) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly respondToRuntimeRequest: (
     input: ProviderAdapterV2RuntimeRequestResponseInput,

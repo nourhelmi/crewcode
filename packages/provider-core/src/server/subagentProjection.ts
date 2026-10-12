@@ -4,6 +4,7 @@ import type {
   ModelSelection,
   NodeId,
   OrchestrationV2AppThread,
+  OrchestrationV2CrewBinding,
   OrchestrationV2Actor,
   OrchestrationV2ConversationMessage,
   OrchestrationV2CreationSource,
@@ -44,6 +45,7 @@ export function subagentThreadTitle(input: {
 
 export function makeSubagentChildThread(input: {
   readonly parentThread: OrchestrationV2AppThread;
+  readonly crew?: OrchestrationV2CrewBinding;
   readonly childThreadId: ThreadId;
   readonly parentNodeId: NodeId;
   readonly activeProviderThreadId: ProviderThreadId | null;
@@ -56,6 +58,7 @@ export function makeSubagentChildThread(input: {
 }): OrchestrationV2AppThread {
   return {
     ...input.parentThread,
+    crew: input.crew,
     createdBy: input.createdBy,
     creationSource: input.creationSource,
     id: input.childThreadId,

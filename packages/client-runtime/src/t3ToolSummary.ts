@@ -144,6 +144,13 @@ export function summarizeT3ToolCalls(
         : `Requested thread creation ${times}`;
       break;
     }
+    case "crew-worker":
+      label = phrase(
+        "Managed",
+        "manage",
+        quantity(countEntities(entityIds("runId")), "Crew worker"),
+      );
+      break;
     case "delegate":
       label = phrase("Delegated", "delegate", quantity(countEntities(entityIds("taskId")), "task"));
       break;
