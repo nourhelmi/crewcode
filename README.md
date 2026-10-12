@@ -1,4 +1,17 @@
-# T3 Code
+# CrewCode
+
+T3 Code's workspace, powered by [Crew](https://github.com/nourhelmi/crew). Crew routes the advisor and workers across your installed coding agents; the app provides projects, conversations, diffs, terminals, and checkpoints.
+
+```bash
+pnpm install --frozen-lockfile
+pnpm crewcode --crew /absolute/path/to/crew/bin/crew
+```
+
+Requires Node 24.13.1 or newer in the 24.x line, pnpm 11, and an installed Crew with authenticated host CLIs. The launcher creates a separate `.crewcode` data directory, registers the local Crew provider, and selects automatic Crew routing. Open the web address printed by the dev runner.
+
+See [CrewCode setup and capabilities](docs/user/crewcode.md). This first integration uses ACP and is a source-run web app; it does not include repackaged desktop or mobile releases. The upstream MIT license and attribution are retained below.
+
+## Upstream T3 Code
 
 T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
 

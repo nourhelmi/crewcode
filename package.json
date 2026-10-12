@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "crewcode": "node scripts/crewcode/start.mjs",
+    "crewcode:setup": "node scripts/crewcode/setup.mjs",
+    "crewcode:acp": "node scripts/crewcode/acp.mjs",
+    "crewcode:test": "node scripts/crewcode/acp.node-test.mjs",
     "prepare": "effect-tsgo patch && vp config --no-agent",
     "dev": "node scripts/dev-runner.ts dev",
     "dev:share": "node scripts/dev-runner.ts dev --share",
