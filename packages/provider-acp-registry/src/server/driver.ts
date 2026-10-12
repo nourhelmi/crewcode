@@ -260,16 +260,70 @@ export function applyAcpRegistryAvailableCommands(
   });
 }
 
+/** Live choices may change; one chat's selected values never become another chat's defaults. */
+function sessionModelCapabilities(model: ServerProviderModel, baseline?: ServerProviderModel) {
+  return createModelCapabilities({
+    optionDescriptors: (model.capabilities?.optionDescriptors ?? []).map((option) => {
+      const previous = baseline?.capabilities?.optionDescriptors?.find(
+        (candidate) => candidate.id === option.id,
+      );
+      const { currentValue: _sessionValue, ...descriptor } = option;
+      if (descriptor.type === "boolean") {
+        return previous?.type === "boolean" && typeof previous.currentValue === "boolean"
+          ? { ...descriptor, currentValue: previous.currentValue }
+          : descriptor;
+      }
+      const options = descriptor.options.map(({ isDefault: _sessionDefault, ...choice }) =>
+        previous?.type === "select" &&
+        previous.options.some((entry) => entry.id === choice.id && entry.isDefault)
+          ? { ...choice, isDefault: true }
+          : choice,
+      );
+      return {
+        ...descriptor,
+        options,
+        ...(previous?.type === "select" &&
+        typeof previous.currentValue === "string" &&
+        options.some((choice) => choice.id === previous.currentValue)
+          ? { currentValue: previous.currentValue }
+          : {}),
+      };
+    }),
+  });
+}
+
 export function applyAcpRegistryLiveConfiguration(
   provider: ServerProvider,
   configuration: AcpRegistryLiveConfiguration,
   customModels: ReadonlyArray<string>,
 ): ServerProvider {
   const { message: _staleProbeMessage, ...snapshot } = provider;
+  const liveModels = modelsFromDiscovery(configuration, customModels);
+  // Crew pins a launched root to its native host. That session-local restriction
+  // must not remove the other host from new chats sharing this provider instance.
+  const discoveredIds = new Set(provider.models.map((model) => model.slug));
+  const current = liveModels.find((model) => model.slug === configuration.currentModelId);
+  const models =
+    configuration.modelCatalogScope === "session"
+      ? [
+          ...provider.models.map((model) =>
+            model.slug === current?.slug
+              ? { ...model, capabilities: sessionModelCapabilities(current, model) }
+              : model,
+          ),
+          ...liveModels
+            .filter((model) => !discoveredIds.has(model.slug))
+            .map((model) => ({
+              ...model,
+              isDefault: false,
+              capabilities: sessionModelCapabilities(model),
+            })),
+        ]
+      : liveModels;
   return {
     ...snapshot,
     status: provider.enabled ? "ready" : provider.status,
-    models: modelsFromDiscovery(configuration, customModels),
+    models,
   };
 }
 

@@ -128,6 +128,7 @@ import {
   applyClaudePromptEffortPrefix,
   createModelSelection,
   formatModelSlugName,
+  preserveSessionOptionSelections,
   resolvePromptInjectedEffort,
   resolveSelectableModel,
 } from "@t3tools/shared/model";
@@ -10808,16 +10809,29 @@ export default function ChatView(props: ChatViewProps) {
         if (options?.focusComposer !== false) scheduleComposerFocus();
         return;
       }
-      // Restore this model's own remembered options; without any, start it
-      // from its default rather than carrying the previous model's over.
+      // Restore model-specific preferences while keeping this session's explicit workflow.
       const rememberedOptions =
         useComposerDraftStore.getState().stickyOptionsByModelByProvider[instanceId]?.[
           resolvedModel
         ];
-      const nextModelSelection: ModelSelection =
+      const rememberedSelection: ModelSelection =
         rememberedOptions !== undefined && rememberedOptions.length > 0
           ? { instanceId, model: resolvedModel, options: [...rememberedOptions] }
           : { instanceId, model: resolvedModel };
+      const currentSelection =
+        composerRef.current?.getSendContext().selectedModelSelection ?? activeThread.modelSelection;
+      const currentEntry = providerStatuses.find(
+        (snapshot) => snapshot.instanceId === currentSelection.instanceId,
+      );
+      const nextModelSelection = preserveSessionOptionSelections({
+        currentSelection,
+        currentCapabilities: currentEntry?.models.find(
+          (candidate) => candidate.slug === currentSelection.model,
+        )?.capabilities,
+        nextSelection: rememberedSelection,
+        nextCapabilities: entry?.models.find((candidate) => candidate.slug === resolvedModel)
+          ?.capabilities,
+      });
       const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
         providers: providerStatuses,
         hasStartedSession: activeRuntime !== null,
@@ -10848,6 +10862,7 @@ export default function ChatView(props: ChatViewProps) {
     [
       activeThread,
       activeRuntime,
+      composerRef,
       lockedProvider,
       supportsProviderSwitchingViaHandoff,
       scheduleComposerFocus,

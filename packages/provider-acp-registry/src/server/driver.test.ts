@@ -4,6 +4,10 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import {
+  buildProviderOptionSelectionsFromDescriptors,
+  getProviderOptionDescriptors,
+} from "@t3tools/shared/model";
 
 import * as AcpRegistrySupport from "./AcpRegistrySupport.ts";
 import {
@@ -176,6 +180,167 @@ describe("acpRegistrySnapshotReadiness", () => {
       nativeSessions: { canList: true, canLoad: true, canResume: true },
       models: [{ slug: "live-model", isDefault: true }],
     });
+  });
+
+  it("keeps the discovered roster and default when a Crew session narrows to one host", () => {
+    const provider = buildCheckedAcpRegistrySnapshot({
+      ...identity,
+      settings: decodeSettings({ source: "local", customModels: ["custom-model"] }),
+      checkedAt: "2026-10-12T20:00:00.000Z",
+      inspection: { status: "ready", version: "1", distribution: "local" },
+      probe: {
+        probe: {
+          instanceId: identity.instanceId,
+          ready: true,
+          icon: null,
+          authMethods: [],
+          models: [
+            { id: "codex/sol", name: "Sol", description: null },
+            { id: "claude/sonnet", name: "Sonnet", description: null },
+          ],
+          currentModelId: "codex/sol",
+          configOptions: [],
+          sessionManagement: noSessionManagement,
+        },
+        slashCommands: [],
+        skills: [],
+      },
+    });
+    const scoped = applyAcpRegistryLiveConfiguration(
+      provider,
+      {
+        modelCatalogScope: "session",
+        models: [
+          { id: "claude/sonnet", name: "Sonnet", description: null },
+          { id: "claude/opus", name: "Opus", description: null },
+        ],
+        currentModelId: "claude/sonnet",
+        configOptions: [
+          {
+            id: "effort",
+            label: "Effort",
+            type: "select",
+            currentValue: "high",
+            options: [{ id: "high", label: "High" }],
+          },
+        ],
+      },
+      ["custom-model"],
+    );
+
+    expect(scoped.models.map((model) => model.slug)).toEqual([
+      "codex/sol",
+      "claude/sonnet",
+      "custom-model",
+      "claude/opus",
+    ]);
+    expect(scoped.models.filter((model) => model.isDefault).map((model) => model.slug)).toEqual([
+      "codex/sol",
+    ]);
+    expect(scoped.models[0]).toBe(provider.models[0]);
+    expect(scoped.models[2]).toBe(provider.models[2]);
+    expect(scoped.models[1]?.capabilities.optionDescriptors).toEqual([
+      {
+        id: "effort",
+        label: "Effort",
+        type: "select",
+        options: [{ id: "high", label: "High" }],
+      },
+    ]);
+    const nextSession = applyAcpRegistryLiveConfiguration(
+      scoped,
+      {
+        modelCatalogScope: "session",
+        models: [{ id: "codex/sol", name: "Sol", description: null }],
+        currentModelId: "codex/sol",
+        configOptions: [],
+      },
+      ["custom-model"],
+    );
+    expect(nextSession.models.map((model) => model.slug)).toEqual(
+      scoped.models.map((model) => model.slug),
+    );
+    expect(nextSession.models[1]).toBe(scoped.models[1]);
+  });
+
+  it("does not turn a live CoS/full-access selection into another draft's defaults", () => {
+    const select = (id: string, currentValue: string, values: string[]) => ({
+      id,
+      label: id,
+      type: "select" as const,
+      currentValue,
+      options: values.map((value) => ({ id: value, label: value })),
+    });
+    const provider = buildCheckedAcpRegistrySnapshot({
+      ...identity,
+      settings: decodeSettings({ source: "local" }),
+      checkedAt: "2026-10-12T20:00:00.000Z",
+      inspection: { status: "ready", version: "1", distribution: "local" },
+      probe: {
+        probe: {
+          instanceId: identity.instanceId,
+          ready: true,
+          icon: null,
+          authMethods: [],
+          models: [{ id: "codex/sol", name: "Sol", description: null }],
+          currentModelId: "codex/sol",
+          configOptions: [
+            { ...select("mode", "advisor", ["advisor", "cos"]), scope: "session" },
+            select("access", "default", ["default", "full"]),
+            select("effort", "high", ["high", "max"]),
+            select("obsolete", "old", ["old"]),
+          ],
+          sessionManagement: noSessionManagement,
+        },
+        slashCommands: [],
+        skills: [],
+      },
+    });
+    const updated = applyAcpRegistryLiveConfiguration(
+      provider,
+      {
+        modelCatalogScope: "session",
+        models: [
+          { id: "codex/sol", name: "Sol", description: null },
+          { id: "codex/new", name: "New", description: null },
+        ],
+        currentModelId: "codex/sol",
+        configOptions: [
+          { ...select("mode", "cos", ["advisor", "cos"]), scope: "session" },
+          select("access", "full", ["default", "full"]),
+          select("effort", "max", ["high", "max", "ultra"]),
+          select("obsolete", "new", ["new"]),
+          {
+            ...select("new-setting", "on", ["on", "off"]),
+            options: [{ id: "on", label: "On", isDefault: true }],
+          },
+          { id: "new-toggle", label: "New toggle", type: "boolean", currentValue: true },
+        ],
+      },
+      [],
+    );
+    const caps = updated.models[0]!.capabilities;
+    expect(caps.optionDescriptors?.find((option) => option.id === "mode")?.scope).toBe("session");
+    expect(caps.optionDescriptors?.find((option) => option.id === "effort")).toMatchObject({
+      currentValue: "high",
+      options: [{ id: "high" }, { id: "max" }, { id: "ultra" }],
+    });
+    const draftOptions = buildProviderOptionSelectionsFromDescriptors(
+      getProviderOptionDescriptors({
+        caps,
+        selections: [{ id: "effort", value: "ultra" }],
+      }),
+    );
+    expect(draftOptions).toEqual([
+      { id: "mode", value: "advisor" },
+      { id: "access", value: "default" },
+      { id: "effort", value: "ultra" },
+    ]);
+    expect(
+      buildProviderOptionSelectionsFromDescriptors(
+        updated.models[1]!.capabilities.optionDescriptors,
+      ),
+    ).toBeUndefined();
   });
 
   it("maps registry inspection status to provider readiness", () => {

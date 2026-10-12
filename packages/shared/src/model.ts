@@ -121,6 +121,53 @@ export function modelSelectionsEqual(left: ModelSelection, right: ModelSelection
   );
 }
 
+/** Keep explicit session choices while restoring the target model's own option preferences. */
+export function preserveSessionOptionSelections(input: {
+  currentSelection: ModelSelection;
+  currentCapabilities: ModelCapabilities | null | undefined;
+  nextSelection: ModelSelection;
+  nextCapabilities: ModelCapabilities | null | undefined;
+}): ModelSelection {
+  const { currentSelection, currentCapabilities, nextSelection, nextCapabilities } = input;
+  if (currentSelection.instanceId !== nextSelection.instanceId) return nextSelection;
+
+  // A different chat may have remembered a workflow for this model. That is
+  // not this session's choice, including when this session uses its default.
+  const sessionIds = new Set(
+    [
+      ...(currentCapabilities?.optionDescriptors ?? []),
+      ...(nextCapabilities?.optionDescriptors ?? []),
+    ]
+      .filter((descriptor) => descriptor.scope === "session")
+      .map((descriptor) => descriptor.id),
+  );
+  const modelOptions = (nextSelection.options ?? []).filter(
+    (selection) => !sessionIds.has(selection.id),
+  );
+  const preserved = (currentSelection.options ?? []).filter((selection) => {
+    const current = currentCapabilities?.optionDescriptors?.find(
+      (descriptor) => descriptor.id === selection.id && descriptor.scope === "session",
+    );
+    const target = nextCapabilities?.optionDescriptors?.find(
+      (descriptor) => descriptor.id === selection.id && descriptor.scope === "session",
+    );
+    if (!current || !target || current.type !== target.type) return false;
+    return target.type === "boolean"
+      ? typeof selection.value === "boolean"
+      : typeof selection.value === "string" &&
+          target.options.some((choice) => choice.id === selection.value);
+  });
+  if (preserved.length === 0 && modelOptions.length === (nextSelection.options?.length ?? 0)) {
+    return nextSelection;
+  }
+  const { options: _previousOptions, ...nextModel } = nextSelection;
+  const options = [...modelOptions, ...preserved.map(cloneSelection)];
+  return {
+    ...nextModel,
+    ...(options.length > 0 ? { options } : {}),
+  };
+}
+
 function resolveDescriptorChoiceValue(
   descriptor: Extract<ProviderOptionDescriptor, { type: "select" }>,
   raw: string | null | undefined,

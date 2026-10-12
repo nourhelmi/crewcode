@@ -19,6 +19,8 @@ const ProviderOptionDescriptorBase = {
   id: TrimmedNonEmptyString,
   label: TrimmedNonEmptyString,
   description: Schema.optional(TrimmedNonEmptyString),
+  /** Session options survive model changes within the same provider instance. Omitted means model. */
+  scope: Schema.optional(Schema.Literals(["model", "session"])),
 } as const;
 
 export const SelectProviderOptionDescriptor = Schema.Struct({

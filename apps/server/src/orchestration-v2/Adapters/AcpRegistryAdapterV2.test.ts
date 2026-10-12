@@ -141,6 +141,109 @@ describe("AcpRegistryAdapterV2", () => {
     });
   });
 
+  it.effect.each(["crew", "other"] as const)(
+    "keeps %s configuration scope tied to its negotiated identity",
+    (name) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-acp-catalog-scope-" });
+        const coordinator = yield* AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator;
+        const transcript = yield* decodeAcpReplayTranscript(
+          {
+            provider: ACP_REGISTRY_PROVIDER,
+            protocol: "acp.ndjson-jsonrpc",
+            version: "1",
+            scenario: "session-catalog-scope",
+            entries: [
+              {
+                type: "expect_outbound",
+                frame: { kind: "request", method: "initialize", params: "<any>" },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  kind: "response",
+                  method: "initialize",
+                  result: {
+                    protocolVersion: 1,
+                    agentInfo: { name, version: "1" },
+                    agentCapabilities: { _meta: { crew: { version: 1 } } },
+                    authMethods: [],
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: { kind: "request", method: "session/new", params: "<any>" },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  kind: "response",
+                  method: "session/new",
+                  result: {
+                    sessionId: "catalog-root",
+                    configOptions: [
+                      {
+                        id: "model",
+                        name: "Model",
+                        category: "model",
+                        type: "select",
+                        currentValue: "codex/sol",
+                        options: [{ value: "codex/sol", name: "Sol" }],
+                      },
+                    ],
+                  },
+                },
+              },
+            ] as never,
+          },
+          ACP_REGISTRY_PROVIDER,
+        );
+        const instanceId = ProviderInstanceId.make(`catalog-scope-${name}`);
+        const adapter = yield* makeAcpRegistryAdapterV2({
+          selfInvocation: yield* resolveSelfInvocation(),
+          instanceId,
+          settings: yield* decodeAcpRegistryAdapterSettings({
+            source: "local",
+            commandPath: "fixture",
+          }),
+          environment: {},
+          makeRuntime: makeAcpReplayRuntime({
+            transcript,
+            statusPath: path.join(directory, "status.json"),
+            scriptPath: yield* path.fromFileUrl(
+              new URL("../../../scripts/acp-replay-agent.ts", import.meta.url),
+            ),
+            childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+            fileSystem: fs,
+          }),
+        }).pipe(Effect.provide(layerInjectedRuntimeCatalog));
+        yield* adapter.openSession({
+          threadId: ThreadId.make(`catalog-scope-${name}`),
+          providerSessionId: ProviderSessionId.make(`catalog-scope-${name}`),
+          modelSelection: { instanceId, model: "default" },
+          runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: directory,
+          }),
+        });
+        const configuration = Option.getOrThrow(
+          yield* coordinator.getLiveConfiguration(instanceId),
+        );
+        assert.equal(configuration.modelCatalogScope, name === "crew" ? "session" : undefined);
+        assert.deepEqual(
+          configuration.models.map((model) => model.id),
+          ["codex/sol"],
+        );
+      }).pipe(
+        Effect.provide(Layer.merge(layerTest, AcpRegistryRuntimeCoordinator.layer)),
+        Effect.scoped,
+      ),
+  );
+
   describe("the agent's own mode picker", () => {
     type Frame = Record<string, unknown>;
     const outbound = (method: string, params: unknown = "<any>"): Frame => ({

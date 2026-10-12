@@ -775,6 +775,23 @@ createInterface({input:process.stdin}).on('line',line => {
             );
             assert.notInclude(yield* pollProtocolMethods(protocolEvents), "session/prompt");
           }
+          const crossHost = yield* Effect.exit(
+            runtime.startTurn(
+              input(6, {
+                ...advisor,
+                model: "claude/sonnet",
+              }),
+            ),
+          );
+          assert.isTrue(
+            Exit.isFailure(crossHost),
+            "the shared roster cannot widen an existing session's native host",
+          );
+          if (Exit.isFailure(crossHost)) {
+            assert.include(Cause.pretty(crossHost.cause), "claude/sonnet");
+            assert.include(Cause.pretty(crossHost.cause), "codex/sol");
+          }
+          assert.notInclude(yield* pollProtocolMethods(protocolEvents), "session/prompt");
         }
       }).pipe(Effect.provide(layerTest), Effect.scoped),
   );

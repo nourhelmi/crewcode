@@ -21,6 +21,7 @@ import {
   hasProviderUsageLimits,
   isUsageLimitsCommand,
 } from "@t3tools/shared/usageLimits";
+import { preserveSessionOptionSelections } from "@t3tools/shared/model";
 import { StackActions, useFocusEffect, useNavigation } from "@react-navigation/native";
 import type { ReactNode } from "react";
 import {
@@ -704,7 +705,14 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       selectedModel: currentModelSelection,
       reportedModelSelection: props.reportedModelSelection,
       onSelectModel: (option) =>
-        props.onUpdateModelSelection(withRememberedModelOptions(option.selection)),
+        props.onUpdateModelSelection(
+          preserveSessionOptionSelections({
+            currentSelection: currentModelSelection,
+            currentCapabilities: currentModelOption?.capabilities,
+            nextSelection: withRememberedModelOptions(option.selection),
+            nextCapabilities: option.capabilities,
+          }),
+        ),
       optionDescriptors: providerOptionDescriptors,
       onUpdateOptionSelections: (options) => {
         rememberModelOptions(
@@ -719,6 +727,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     }),
     [
       currentModelSelection,
+      currentModelOption?.capabilities,
       props.reportedModelSelection,
       currentRuntimeMode,
       props.onUpdateModelSelection,

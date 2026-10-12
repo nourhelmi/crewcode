@@ -20,7 +20,223 @@ import {
   normalizeCustomModelSlug,
   normalizeModelSlug,
   modelSelectionsEqual,
+  preserveSessionOptionSelections,
 } from "./model.ts";
+
+describe("preserveSessionOptionSelections", () => {
+  const instanceId = ProviderInstanceId.make("crew");
+  const capabilities = createModelCapabilities({
+    optionDescriptors: [
+      {
+        id: "workflow",
+        label: "Workflow",
+        type: "select",
+        scope: "session",
+        options: [
+          { id: "advisor", label: "Advisor" },
+          { id: "cos", label: "CoS" },
+        ],
+        currentValue: "advisor",
+      },
+      {
+        id: "effort",
+        label: "Effort",
+        type: "select",
+        options: [
+          { id: "low", label: "Low" },
+          { id: "high", label: "High" },
+        ],
+        currentValue: "low",
+      },
+      { id: "access", label: "Access", type: "boolean", currentValue: false },
+    ],
+  });
+
+  it.each(["advisor", "cos"])(
+    "keeps explicit %s while restoring target model effort",
+    (workflow) => {
+      const currentSelection = {
+        instanceId,
+        model: "astra",
+        options: [
+          { id: "workflow", value: workflow },
+          { id: "effort", value: "high" },
+          { id: "access", value: true },
+        ],
+      };
+      const nextSelection = {
+        instanceId,
+        model: "sol",
+        options: [
+          { id: "workflow", value: workflow === "cos" ? "advisor" : "cos" },
+          { id: "effort", value: "low" },
+        ],
+      };
+      expect(
+        preserveSessionOptionSelections({
+          currentSelection,
+          currentCapabilities: capabilities,
+          nextSelection,
+          nextCapabilities: capabilities,
+        }),
+      ).toEqual({
+        instanceId,
+        model: "sol",
+        options: [
+          { id: "effort", value: "low" },
+          { id: "workflow", value: workflow },
+        ],
+      });
+      expect(nextSelection.options[0]?.value).not.toBe(workflow);
+    },
+  );
+
+  it("keeps an explicit workflow when the target model has no remembered options", () => {
+    expect(
+      preserveSessionOptionSelections({
+        currentSelection: {
+          instanceId,
+          model: "astra",
+          options: [
+            { id: "workflow", value: "cos" },
+            { id: "effort", value: "high" },
+          ],
+        },
+        currentCapabilities: capabilities,
+        nextSelection: { instanceId, model: "sol" },
+        nextCapabilities: capabilities,
+      }),
+    ).toEqual({ instanceId, model: "sol", options: [{ id: "workflow", value: "cos" }] });
+  });
+
+  it("does not copy catalog defaults into explicit selections", () => {
+    const nextSelection = { instanceId, model: "sol" };
+    expect(
+      preserveSessionOptionSelections({
+        currentSelection: { instanceId, model: "astra" },
+        currentCapabilities: capabilities,
+        nextSelection,
+        nextCapabilities: capabilities,
+      }),
+    ).toBe(nextSelection);
+  });
+
+  it("drops another chat's remembered workflow when this session uses its default", () => {
+    expect(
+      preserveSessionOptionSelections({
+        currentSelection: { instanceId, model: "astra" },
+        currentCapabilities: capabilities,
+        nextSelection: {
+          instanceId,
+          model: "sol",
+          options: [
+            { id: "workflow", value: "cos" },
+            { id: "effort", value: "low" },
+          ],
+        },
+        nextCapabilities: capabilities,
+      }),
+    ).toEqual({ instanceId, model: "sol", options: [{ id: "effort", value: "low" }] });
+  });
+
+  it("does not carry session options to a different provider instance", () => {
+    const nextSelection = { instanceId: ProviderInstanceId.make("other-crew"), model: "sol" };
+    expect(
+      preserveSessionOptionSelections({
+        currentSelection: {
+          instanceId,
+          model: "astra",
+          options: [{ id: "workflow", value: "cos" }],
+        },
+        currentCapabilities: capabilities,
+        nextSelection,
+        nextCapabilities: capabilities,
+      }),
+    ).toBe(nextSelection);
+  });
+
+  it("requires a compatible session descriptor on both models", () => {
+    const currentSelection = {
+      instanceId,
+      model: "astra",
+      options: [{ id: "workflow", value: "cos" }],
+    };
+    const nextSelection = {
+      instanceId,
+      model: "sol",
+      options: [{ id: "workflow", value: "advisor" }],
+    };
+    for (const nextCapabilities of [
+      {},
+      {
+        optionDescriptors: [
+          {
+            id: "workflow",
+            label: "Workflow",
+            type: "select" as const,
+            options: [{ id: "cos", label: "CoS" }],
+          },
+        ],
+      },
+      {
+        optionDescriptors: [
+          {
+            id: "workflow",
+            label: "Workflow",
+            type: "boolean" as const,
+            scope: "session" as const,
+          },
+        ],
+      },
+      {
+        optionDescriptors: [
+          {
+            id: "workflow",
+            label: "Workflow",
+            type: "select" as const,
+            scope: "session" as const,
+            options: [{ id: "advisor", label: "Advisor" }],
+          },
+        ],
+      },
+    ]) {
+      expect(
+        preserveSessionOptionSelections({
+          currentSelection,
+          currentCapabilities: capabilities,
+          nextSelection,
+          nextCapabilities,
+        }),
+      ).toEqual({ instanceId, model: "sol" });
+    }
+    expect(
+      preserveSessionOptionSelections({
+        currentSelection,
+        currentCapabilities: {},
+        nextSelection,
+        nextCapabilities: capabilities,
+      }),
+    ).toEqual({ instanceId, model: "sol" });
+  });
+
+  it("preserves explicit false for a session-scoped toggle", () => {
+    const toggle: ModelCapabilities = {
+      optionDescriptors: [{ id: "workflow", label: "Workflow", type: "boolean", scope: "session" }],
+    };
+    expect(
+      preserveSessionOptionSelections({
+        currentSelection: {
+          instanceId,
+          model: "astra",
+          options: [{ id: "workflow", value: false }],
+        },
+        currentCapabilities: toggle,
+        nextSelection: { instanceId, model: "sol", options: [{ id: "workflow", value: true }] },
+        nextCapabilities: toggle,
+      }).options,
+    ).toEqual([{ id: "workflow", value: false }]);
+  });
+});
 
 it("keeps the Codex catalog display formatting", () => {
   expect(formatCodexModelName("gpt-5.3-codex-spark")).toBe("GPT-5.3-Codex-Spark");

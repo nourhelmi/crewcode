@@ -168,6 +168,8 @@ export interface AcpRegistryAvailableCommands {
 }
 
 export interface AcpRegistryLiveConfiguration {
+  /** A running session may narrow choices without changing the provider's roster. */
+  readonly modelCatalogScope?: "session";
   readonly models: ReadonlyArray<AcpRegistryProbeModel>;
   readonly currentModelId: string | null;
   readonly configOptions: AcpRegistryProbeResult["configOptions"];

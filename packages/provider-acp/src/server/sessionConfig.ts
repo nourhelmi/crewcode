@@ -81,6 +81,7 @@ export function acpProviderOptionDescriptors(input: {
       id,
       label: boundedText(option.name, MAX_TEXT_LENGTH) || id,
       ...(description ? { description } : {}),
+      ...(option.category === "mode" ? { scope: "session" as const } : {}),
     } as const;
     if (option.type === "boolean") {
       if (option.category === "mode") hasModeCategory = true;
@@ -140,6 +141,7 @@ export function acpProviderOptionDescriptors(input: {
         id: ACP_SESSION_MODE_OPTION_ID,
         label: "Mode",
         description: "Session mode advertised by the ACP agent.",
+        scope: "session",
         type: "select",
         options: choices,
         ...(currentValue && choices.some((choice) => choice.id === currentValue)

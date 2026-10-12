@@ -1,6 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
+import { ModelCapabilities } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 
 import { ACP_SESSION_MODE_OPTION_ID, acpProviderOptionDescriptors } from "./sessionConfig.ts";
+
+const decodeCapabilities = Schema.decodeSync(ModelCapabilities);
 
 describe("acpProviderOptionDescriptors", () => {
   it("maps non-model select options and excludes model and collaboration categories", () => {
@@ -141,6 +145,7 @@ describe("acpProviderOptionDescriptors", () => {
         id: ACP_SESSION_MODE_OPTION_ID,
         label: "Mode",
         description: "Session mode advertised by the ACP agent.",
+        scope: "session",
         type: "select",
         options: [
           { id: "safe", label: "Safe" },
@@ -259,5 +264,29 @@ describe("acpProviderOptionDescriptors", () => {
     });
 
     expect(descriptors.map((descriptor) => descriptor.id)).toEqual(["mode"]);
+    expect(descriptors[0]?.scope).toBe("session");
+    expect(
+      decodeCapabilities({ optionDescriptors: descriptors }).optionDescriptors?.[0]?.scope,
+    ).toBe("session");
+  });
+
+  it("marks mode-category toggles as session-scoped without carrying inference options", () => {
+    const descriptors = acpProviderOptionDescriptors({
+      configOptions: [
+        {
+          id: "workflow",
+          name: "Workflow",
+          category: "mode",
+          type: "boolean",
+          currentValue: false,
+        },
+        { id: "fast", name: "Fast", type: "boolean", currentValue: true },
+      ],
+      modeState: undefined,
+    });
+    expect(descriptors.map(({ id, scope }) => ({ id, scope }))).toEqual([
+      { id: "workflow", scope: "session" },
+      { id: "fast", scope: undefined },
+    ]);
   });
 });

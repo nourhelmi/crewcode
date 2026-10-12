@@ -12,9 +12,9 @@ Open `CrewCode.app`, add a project, choose **Crew**, select a lead model, and se
 
 The app starts its own local server. Crew, Node 24+, and authenticated Codex/Claude CLIs are separate installations. No browser is required. Native Codex and Claude providers remain available for ordinary conversations; selecting one does not activate this ACP integration.
 
-Change the lead model or switch between Advisor and Chief of staff in the same chat using the composer controls. Changes apply on the next root turn, once the current turn finishes or is interrupted. The root keeps its native conversation and existing workers keep their assignments. After launch, model choices stay within the root's provider: switch Codex models within a Codex-led chat, or Claude models within a Claude-led chat. Start a new chat to change between Codex and Claude.
+Change the lead model or switch between Advisor and Chief of staff in the same chat using the composer controls. Changes apply on the next root turn, once the current turn finishes or is interrupted. The root keeps its native conversation and existing workers keep their assignments. After launch, model changes must stay within the root's provider: switch Codex models within a Codex-led chat, or Claude models within a Claude-led chat. The shared picker may list models from both providers, but an existing chat rejects a cross-provider selection before sending the next prompt. Start a new chat to change between Codex and Claude; both remain available for new chats.
 
-Effort follows the selected model's supported values. Native permissions remain fixed after launch. If Crew rejects a configuration change, the next prompt fails visibly instead of running under an unacknowledged choice. Existing native conversations retain their history, but the old T3-owned Crew worker launcher has been removed.
+An explicitly chosen Advisor or Chief of staff workflow stays selected when changing models. Effort follows the selected model's remembered or default value and supported choices. Native permissions remain fixed after launch. If Crew rejects a configuration change, the next prompt fails visibly instead of running under an unacknowledged choice. Existing native conversations retain their history, but the old T3-owned Crew worker launcher has been removed.
 
 ## Stock T3 or another ACP client
 

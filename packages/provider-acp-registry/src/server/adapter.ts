@@ -237,10 +237,10 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
               normalizeAcpRegistryCommands(commands),
             ),
           onSessionConfigurationUpdate: (configOptions, modeState) =>
-            runtimeCoordinator.publishLiveConfiguration(
-              options.instanceId,
-              normalizeAcpRegistryLiveConfiguration(configOptions, modeState),
-            ),
+            runtimeCoordinator.publishLiveConfiguration(options.instanceId, {
+              ...normalizeAcpRegistryLiveConfiguration(configOptions, modeState),
+              ...(crewRouting.ownsWorkflow() ? { modelCatalogScope: "session" as const } : {}),
+            }),
           onUrlElicitation: ({ elicitationId, url, message }) => {
             const normalizedUrl = normalizeAcpRegistryWebUrl(url);
             if (normalizedUrl === undefined || elicitationId.trim().length === 0) {
