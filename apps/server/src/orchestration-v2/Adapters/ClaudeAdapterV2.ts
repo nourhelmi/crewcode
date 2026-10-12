@@ -3408,6 +3408,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         });
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
+        const promptAcceptances = new Map<
+          string,
+          {
+            readonly query: ClaudeAgentSdkQuerySession;
+            readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
+            readonly accepted: Effect.Effect<void>;
+          }
+        >();
         const sdkMessageLock = yield* Semaphore.make(1);
         // Survives turn settle: members mostly finish after the launching
         // turn has ended, and each transition must be emitted exactly once.
@@ -5724,6 +5732,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly threadDisposition?: "reusable" | "broken";
           readonly result?: SDKResultMessage;
         }) {
+          for (const [uuid, acceptance] of promptAcceptances) {
+            if (acceptance.providerTurnId === input.context.providerTurnId)
+              promptAcceptances.delete(uuid);
+          }
           yield* crew.finish(
             input.context.nativeThreadId,
             input.context.providerTurnId,
@@ -7744,6 +7756,22 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly message: SDKMessage;
         }) {
           const message = input.message;
+          // Queue.offer only hands input to the SDK. A resumed CLI may process
+          // older wake turns first; only its exact UUID receipt proves delivery.
+          const acceptedUuids = [...claudeEchoedPromptUuids(message)];
+          const acceptanceLifecycle = claudePromptLifecycle(message);
+          if (acceptanceLifecycle?.state === "started")
+            acceptedUuids.push(acceptanceLifecycle.uuid);
+          for (const uuid of acceptedUuids) {
+            const acceptance = promptAcceptances.get(uuid);
+            if (acceptance?.query !== input.query) continue;
+            promptAcceptances.delete(uuid);
+            yield* acceptance.accepted.pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("orchestration-v2.prompt-acknowledgement-failed", { cause }),
+              ),
+            );
+          }
           const context = yield* Ref.get(activeTurn);
           const liveQuery = yield* Ref.get(queryContext);
           if (
@@ -8415,6 +8443,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             Effect.exit,
             Effect.flatMap(
               Effect.fnUntraced(function* (exit: ClaudeQueryStreamExit) {
+                for (const [uuid, acceptance] of promptAcceptances) {
+                  if (acceptance.query === querySession) promptAcceptances.delete(uuid);
+                }
                 // Output held for a prompt echo that never came still
                 // belongs to the turn this stream ended in. A replaced
                 // query's exit must not touch the next query's turn.
@@ -8577,7 +8608,20 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               // afterwards with correct attribution.
               // Counted only here, so a turn that failed to start does not age reports.
               yield* startUserTurnForWakeReports(nativeThreadId);
-              yield* querySession.query.offer(userMessage);
+              if (turnInput.onPromptAccepted !== undefined && promptUuid !== null) {
+                promptAcceptances.set(promptUuid, {
+                  query: querySession.query,
+                  providerTurnId,
+                  accepted: turnInput.onPromptAccepted,
+                });
+              }
+              yield* querySession.query.offer(userMessage).pipe(
+                Effect.onError(() =>
+                  Effect.sync(() => {
+                    if (promptUuid !== null) promptAcceptances.delete(promptUuid);
+                  }),
+                ),
+              );
               return;
             }
             // Transcript reads suspend replay. Hold live SDK frames until the whole
@@ -8800,7 +8844,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 detail: `Claude provider turn ${turnInput.providerTurnId} is not the active turn.`,
               });
             }
+            const promptUuid =
+              turnInput.onPromptAccepted === undefined
+                ? undefined
+                : yield* crypto.randomUUIDv4.pipe(Effect.filterOrFail(isClaudePromptUuid));
             const userMessage = yield* makeClaudeUserMessageWithAttachments({
+              ...(promptUuid === undefined ? {} : { uuid: promptUuid }),
               text: applyClaudePromptEffortPrefix(
                 turnInput.message.text,
                 compileClaudeModelSelection(currentTurn.input.modelSelection).promptEffort,
@@ -8816,7 +8865,20 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               next.add(turnInput.providerTurnId);
               return next;
             });
-            yield* existing.query.offer(userMessage);
+            if (promptUuid !== undefined && turnInput.onPromptAccepted !== undefined) {
+              promptAcceptances.set(promptUuid, {
+                query: existing.query,
+                providerTurnId: turnInput.providerTurnId,
+                accepted: turnInput.onPromptAccepted,
+              });
+            }
+            yield* existing.query.offer(userMessage).pipe(
+              Effect.onError(() =>
+                Effect.sync(() => {
+                  if (promptUuid !== undefined) promptAcceptances.delete(promptUuid);
+                }),
+              ),
+            );
           },
           (effect, turnInput) =>
             effect.pipe(
@@ -8893,6 +8955,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           getModelContextWindow: (selection) =>
             resolveClaudeCatalogContextWindowTokens(BUNDLED_CLAUDE_MODEL_CATALOG, selection),
           events: Stream.fromEffectRepeat(Queue.take(events)),
+          hasActiveTurn: Ref.get(activeTurn).pipe(Effect.map((turn) => turn !== null)),
           hasPendingBackgroundWork: Effect.gen(function* () {
             yield* crew.refresh;
             if (yield* crew.pending()) return true;

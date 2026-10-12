@@ -9,8 +9,8 @@ import * as Path from "effect/Path";
 import * as ServerSettings from "../serverSettings.ts";
 import * as CrewNativeControl from "./CrewNativeControl.ts";
 
-it.effect(
-  "records private idempotent amendments and metadata-only retirement without forwarding native credentials",
+it.live(
+  "prepares exact native amendments and acknowledges only accepted prompts without forwarding credentials",
   () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -42,24 +42,43 @@ it.effect(
           const service = yield* CrewNativeControl.CrewNativeControl;
           const amendment = {
             ...owner,
-            requestId: `command:${"long".repeat(100)}`,
+            requestId: `message:${"long".repeat(100)}`,
+            attemptId: `attempt:%${"long".repeat(100)}`,
             text: "Human scope change",
+            attachmentCount: 0,
+            nativeBusy: false,
           };
-          yield* service.amend(amendment);
-          yield* service.amend(amendment);
+          const busy = yield* service
+            .prepareMessage({ ...amendment, nativeBusy: true })
+            .pipe(Effect.flip);
+          assert.strictEqual(busy._tag, "CrewNativeFollowupBusyError");
+          assert.strictEqual(yield* fs.exists(path.join(home, "calls")), false);
+          const delivery = yield* service.prepareMessage(amendment);
+          const beforeAcceptance = (yield* fs.readFileString(path.join(home, "calls")))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          assert.deepEqual(
+            beforeAcceptance.map((call) => call.args[0]),
+            ["t3-amend", "t3-amend-prepare"],
+          );
+          yield* delivery.onPromptAccepted;
+          yield* service.prepareMessage(amendment);
           yield* service.retire(owner);
           yield* service.confirmStopped(owner);
           const calls = (yield* fs.readFileString(path.join(home, "calls")))
             .trim()
             .split("\n")
             .map((line) => JSON.parse(line));
-          assert.strictEqual(calls[0].args[3], calls[1].args[3]);
+          assert.strictEqual(calls[0].args[3], calls[3].args[3]);
           assert.match(calls[0].args[3], /^t3-[a-f0-9]{64}$/);
           assert.strictEqual(calls[0].text, amendment.text);
           assert.strictEqual(yield* fs.exists(calls[0].args[5]), false);
-          assert.deepEqual(calls[2].args, ["stop", "worker"]);
-          assert.strictEqual(calls[3].env.CREW_T3_STOP_CONFIRMED, "1");
-          for (const call of calls.slice(0, 3))
+          assert.deepEqual(calls[1].args.slice(1), calls[2].args.slice(1));
+          assert.match(calls[1].args[5], /^t3-[a-f0-9]{64}$/);
+          assert.deepEqual(calls[5].args, ["stop", "worker"]);
+          assert.strictEqual(calls[6].env.CREW_T3_STOP_CONFIRMED, "1");
+          for (const call of calls.slice(0, 6))
             assert.strictEqual(call.env.CREW_T3_STOP_CONFIRMED, undefined);
           for (const call of calls) {
             assert.strictEqual(call.env.CREW_HOME, home);
@@ -74,8 +93,21 @@ it.effect(
             ])
               assert.strictEqual(call.env[key], undefined);
           }
+          const attachmentDelivery = yield* service.prepareMessage({
+            ...amendment,
+            requestId: "attachment",
+            text: "",
+            attachmentCount: 2,
+          });
+          const attachmentCalls = (yield* fs.readFileString(path.join(home, "calls")))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          assert.match(attachmentCalls.at(-2).text, /2 attached file/);
           yield* fs.writeFileString(path.join(home, "fail"), "");
-          const failed = yield* service.amend(amendment).pipe(Effect.flip);
+          // A transport acknowledgment failure never fails an already accepted native turn.
+          yield* attachmentDelivery.onPromptAccepted;
+          const failed = yield* service.prepareMessage(amendment).pipe(Effect.flip);
           assert.strictEqual(failed._tag, "CrewNativeControlError");
         }).pipe(
           Effect.provide(

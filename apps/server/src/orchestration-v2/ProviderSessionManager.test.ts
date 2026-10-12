@@ -14,7 +14,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
-  type ProviderSessionId,
+  ProviderSessionId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -29,6 +29,7 @@ import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 import { HttpServer } from "effect/http";
@@ -317,7 +318,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly beforeOpen?: (input: {
       readonly providerSessionId: ProviderSessionId;
       readonly initialProviderItemIdentityVersion?: 2;
-    }) => Effect.Effect<void>;
+    }) => Effect.Effect<void, never, Scope.Scope>;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
     readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
     readonly hangSessionScopeClose?: boolean;
@@ -457,7 +458,7 @@ function layerTest(input: {
   readonly beforeOpen?: (input: {
     readonly providerSessionId: ProviderSessionId;
     readonly initialProviderItemIdentityVersion?: 2;
-  }) => Effect.Effect<void>;
+  }) => Effect.Effect<void, never, Scope.Scope>;
   readonly failReleaseEventWrites?: boolean;
   readonly flakyReleaseWrites?: FlakyReleaseWrites;
   readonly pauseAttachWrite?: Parameters<typeof layerPausingAttachEventSink>[0];
@@ -4804,4 +4805,115 @@ it.effect(
         ),
       );
     }),
+);
+
+it.effect.each([false, true])(
+  "strict release retains close proof after a removed runtime times out (firstStrict=%s)",
+  (firstStrict) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const closing = yield* Deferred.make<void>();
+      const allowClose = yield* Deferred.make<void>();
+      const beforeOpen = () =>
+        Effect.addFinalizer(() =>
+          Deferred.succeed(closing, undefined).pipe(Effect.andThen(Deferred.await(allowClose))),
+        );
+      yield* Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const threadId = ThreadId.make("strict-close-timeout");
+        const providerSessionId = ProviderSessionId.make("strict-close-timeout-session");
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator, threadId, now: yield* DateTime.now }),
+          ],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const first = yield* manager
+          .release({
+            providerSessionId,
+            reason: "manual_shutdown",
+            requireClosed: firstStrict,
+          })
+          .pipe(Effect.exit, Effect.forkChild);
+        yield* Deferred.await(closing);
+        yield* TestClock.adjust("30 seconds");
+        assert.equal(Exit.isFailure(yield* Fiber.join(first)), firstStrict);
+        assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+        const retryFinished = yield* Deferred.make<void>();
+        const retry = yield* manager
+          .release({
+            providerSessionId,
+            reason: "manual_shutdown",
+            requireClosed: true,
+          })
+          .pipe(
+            Effect.exit,
+            Effect.tap(() => Deferred.succeed(retryFinished, undefined)),
+            Effect.forkChild,
+          );
+        // Advance within the close deadline to prove an absent live entry does not
+        // acknowledge a still-closing process. The deferred, not elapsed time, ends it.
+        yield* TestClock.adjust("1 second");
+        assert.isFalse(yield* Deferred.isDone(retryFinished));
+        yield* Deferred.succeed(allowClose, undefined);
+        assert.isTrue(Exit.isSuccess(yield* Fiber.join(retry)));
+        yield* manager.release({
+          providerSessionId,
+          reason: "manual_shutdown",
+          requireClosed: true,
+        });
+      }).pipe(Effect.provide(layerTest({ state, beforeOpen, idleTimeoutMs: 60_000 })));
+    }),
+);
+
+it.effect("strict release never treats a previous failed close as proof of process exit", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    yield* Effect.gen(function* () {
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const threadId = ThreadId.make("strict-close-failed");
+      const providerSessionId = ProviderSessionId.make("strict-close-failed-session");
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      yield* eventSink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator, threadId, now: yield* DateTime.now }),
+        ],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      assert.isTrue(
+        Exit.isFailure(
+          yield* Effect.exit(
+            manager.release({
+              providerSessionId,
+              reason: "manual_shutdown",
+            }),
+          ),
+        ),
+      );
+      assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+      assert.isTrue(
+        Exit.isFailure(
+          yield* Effect.exit(
+            manager.release({
+              providerSessionId,
+              reason: "manual_shutdown",
+              requireClosed: true,
+            }),
+          ),
+        ),
+      );
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          beforeOpen: () =>
+            Effect.addFinalizer(() => Effect.die("simulated process close failure")),
+        }),
+      ),
+    );
+  }),
 );

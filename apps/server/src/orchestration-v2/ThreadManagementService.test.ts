@@ -965,16 +965,15 @@ it.effect.each([
 );
 
 it.effect.each([false, true])(
-  "records human Crew amendments before native dispatch (attachmentOnly=%s)",
+  "leaves queued human Crew messages unamended until actual native dispatch (attachmentOnly=%s)",
   (attachmentOnly) => {
     const threadId = ThreadId.make("thread:crew-composer");
     const instanceId = ProviderInstanceId.make("codex");
     const commandId = CommandId.make("command:crew-composer");
     const calls: string[] = [];
-    const amendments: Array<{ requestId: string; text: string }> = [];
-    let failAmend = false;
     const projection = {
       runs: [],
+      subagents: [],
       runtimeRequests: [],
       providerThreads: [],
       thread: {
@@ -999,18 +998,10 @@ it.effect.each([false, true])(
               }),
           }),
           Layer.mock(CrewNativeControl.CrewNativeControl)({
-            amend: (input) =>
-              Effect.suspend(() => {
-                calls.push("amend");
-                amendments.push(input);
-                return failAmend
-                  ? Effect.fail(
-                      new CrewNativeControl.CrewNativeControlError({
-                        runId: "worker",
-                        operation: "amend",
-                      }),
-                    )
-                  : Effect.void;
+            prepareMessage: () => Effect.die("Queueing must not amend Crew state"),
+            confirmStopped: () =>
+              Effect.sync(() => {
+                calls.push("confirm");
               }),
             retire: () =>
               Effect.sync(() => {
@@ -1046,36 +1037,7 @@ it.effect.each([false, true])(
         creationSource: "web",
       } as const;
       yield* service.dispatch(command);
-      expect(calls).toEqual(["amend", "message.dispatch"]);
-      expect(amendments[0]?.requestId).toBe(commandId);
-      expect(amendments[0]?.text).toBe(
-        attachmentOnly
-          ? "Human follow-up with 1 attached file(s); inspect the attachments in this native chat."
-          : command.text,
-      );
-      calls.length = 0;
-      failAmend = true;
-      yield* service.dispatch(command).pipe(Effect.flip);
-      expect(calls).toEqual(["amend"]);
-      calls.length = 0;
-      for (const type of ["thread.stop", "thread.archive", "thread.delete"] as const) {
-        yield* service.dispatch({ type, threadId, commandId: CommandId.make(`command:${type}`) });
-        yield* service.dispatch({ type, threadId, commandId: CommandId.make(`command:${type}`) });
-      }
-      expect(calls).toEqual([
-        "thread.stop",
-        "retire",
-        "thread.stop",
-        "retire",
-        "thread.archive",
-        "retire",
-        "thread.archive",
-        "retire",
-        "thread.delete",
-        "retire",
-        "thread.delete",
-        "retire",
-      ]);
+      expect(calls).toEqual(["message.dispatch"]);
     }).pipe(Effect.provide(layer));
   },
 );

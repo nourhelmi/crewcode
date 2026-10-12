@@ -6254,6 +6254,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           );
         });
 
+        const acknowledgePrompt = (accepted: Effect.Effect<void> | undefined) =>
+          (accepted ?? Effect.void).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("orchestration-v2.prompt-acknowledgement-failed", { cause }),
+            ),
+          );
+
         /** Starts a native turn with this run's full turn configuration. */
         const startNativeTurn = (
           turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
@@ -6496,6 +6503,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           // (not pending) between turns, so idle release can win the race
           // against a long-delayed resume. Codex emits no resume-expected
           // signal to pin on.
+          hasActiveTurn: Ref.get(activeTurns).pipe(Effect.map((turns) => turns.size > 0)),
           hasPendingBackgroundWork: Effect.gen(function* () {
             yield* crew.refresh;
             if (yield* crew.pending()) return true;
@@ -6708,7 +6716,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               turnInput.restartContinuationOfRunId === undefined
                 ? parseCodexGoalCommand(turnInput.message.text)
                 : null;
-            if (goalCommand !== null) return runGoalCommand(turnInput, goalCommand);
+            if (goalCommand !== null)
+              return runGoalCommand(turnInput, goalCommand).pipe(
+                Effect.andThen(acknowledgePrompt(turnInput.onPromptAccepted)),
+              );
             return Effect.gen(function* () {
               yield* startNativeTurn(
                 turnInput,
@@ -6716,6 +6727,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   ? yield* toCodexInput(turnInput)
                   : [],
               );
+              yield* acknowledgePrompt(turnInput.onPromptAccepted);
             }).pipe(
               Effect.mapError(
                 (cause) =>
@@ -6754,6 +6766,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 input: codexInput,
                 threadId,
               });
+              yield* acknowledgePrompt(turnInput.onPromptAccepted);
             }).pipe(
               Effect.mapError(
                 (cause) =>

@@ -4737,6 +4737,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection,
         command.dispatchMode,
         command.deliveryIntent,
+        command.createdBy,
       );
       if (dispatchMode.type === "steer_active") {
         const targetRunId = dispatchMode.targetRunId;
@@ -7683,6 +7684,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandId: command.commandId,
           commandType: command.type,
           cause: `Queued run ${queuedRun.id} is missing message or execution state.`,
+        });
+      }
+      if (projection.thread.crew !== undefined && queuedMessage.createdBy === "user") {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Crew worker follow-ups must remain queued until the worker is idle.",
         });
       }
       if (

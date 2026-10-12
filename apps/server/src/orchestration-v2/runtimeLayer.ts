@@ -164,12 +164,19 @@ const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pip
       layerProviderAuthServiceProvided,
       layerRunExecutionServiceProvided,
       layerRuntimePolicyProvided,
+      CrewNativeControl.layer,
     ),
   ),
 );
 
 const layerProviderTurnControlServiceProvided = ProviderTurnControlService.layer.pipe(
-  Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectionStore.layer,
+      layerProviderSessionManagerProvided,
+      CrewNativeControl.layer,
+    ),
+  ),
 );
 const layerRuntimeRequestServiceProvided = RuntimeRequestService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),

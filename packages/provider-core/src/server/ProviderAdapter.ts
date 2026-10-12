@@ -405,6 +405,8 @@ export interface ProviderAdapterV2EnsureThreadInput {
 }
 
 export interface ProviderAdapterV2TurnInput {
+  /** Called once the native provider acknowledges this prompt, never just a local queue offer. */
+  readonly onPromptAccepted?: Effect.Effect<void>;
   readonly appThread: OrchestrationV2AppThread;
   readonly threadId: ThreadId;
   readonly runId: RunId;
@@ -428,6 +430,8 @@ export interface ProviderAdapterV2TurnInput {
 }
 
 export interface ProviderAdapterV2SteerInput {
+  /** Called only for native acceptance of this exact steering message. */
+  readonly onPromptAccepted?: Effect.Effect<void>;
   readonly threadId: ThreadId;
   readonly runId: RunId;
   readonly providerThread: OrchestrationV2ProviderThread;
@@ -551,6 +555,8 @@ export interface ProviderAdapterV2SessionRuntime {
    * here so the session manager defers idle release while it is pending.
    */
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
+  /** Native foreground or autonomous turn still in flight, independent of app run state. */
+  readonly hasActiveTurn?: Effect.Effect<boolean>;
   /**
    * Per-provider-thread pending work for root-run ingestion stop gates. When
    * present, RunExecutionService uses only this probe (never the session-wide

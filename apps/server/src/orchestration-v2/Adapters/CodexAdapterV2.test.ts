@@ -2557,8 +2557,20 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         attemptId: RunAttemptId.make("skill-sigil-attempt"),
         text: "€review do it",
       });
-      yield* harness.runtime.startTurn(turnInput);
+      const accepted: string[] = [];
+      assert.isFalse(yield* harness.runtime.hasActiveTurn!);
+      yield* harness.runtime.startTurn({
+        ...turnInput,
+        onPromptAccepted: Effect.sync(() => {
+          accepted.push("start");
+        }),
+      });
+      assert.deepEqual(accepted, ["start"]);
+      assert.isTrue(yield* harness.runtime.hasActiveTurn!);
       yield* harness.runtime.steerTurn({
+        onPromptAccepted: Effect.sync(() => {
+          accepted.push("steer");
+        }),
         threadId: harness.threadId,
         runId: turnInput.runId,
         providerThread: harness.providerThread,
@@ -2572,6 +2584,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           text: "then £ship it",
         },
       });
+      assert.deepEqual(accepted, ["start", "steer"]);
     }).pipe(
       Effect.scoped,
       Effect.provide(

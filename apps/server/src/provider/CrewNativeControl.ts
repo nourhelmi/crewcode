@@ -8,6 +8,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ServerSettings from "../serverSettings.ts";
@@ -26,7 +27,16 @@ export class CrewNativeControlError extends Schema.TaggedError<CrewNativeControl
       : "Crew metadata cleanup failed. Native cancellation may be incomplete; retry Stop.";
   }
 }
+export class CrewNativeFollowupBusyError extends Schema.TaggedError<CrewNativeFollowupBusyError>()(
+  "CrewNativeFollowupBusyError",
+  { runId: Schema.String },
+) {
+  override get message() {
+    return "This Crew worker still has native background work. Retry the follow-up when it is idle; its packet has not changed.";
+  }
+}
 const isCrewNativeControlError = Schema.is(CrewNativeControlError);
+const isCrewNativeFollowupBusyError = Schema.is(CrewNativeFollowupBusyError);
 type Owner = {
   readonly crew: OrchestrationV2CrewBinding;
   readonly providerInstanceId: ProviderInstanceId;
@@ -34,9 +44,18 @@ type Owner = {
 export class CrewNativeControl extends Context.Service<
   CrewNativeControl,
   {
-    readonly amend: (
-      input: Owner & { readonly requestId: string; readonly text: string },
-    ) => Effect.Effect<void, CrewNativeControlError>;
+    readonly prepareMessage: (
+      input: Owner & {
+        readonly requestId: string;
+        readonly attemptId: string;
+        readonly text: string;
+        readonly attachmentCount: number;
+        readonly nativeBusy: boolean;
+      },
+    ) => Effect.Effect<
+      { readonly onPromptAccepted: Effect.Effect<void> },
+      CrewNativeControlError | CrewNativeFollowupBusyError
+    >;
     readonly confirmStopped: (input: Owner) => Effect.Effect<void, CrewNativeControlError>;
     readonly retire: (input: Owner) => Effect.Effect<void, CrewNativeControlError>;
   }
@@ -97,15 +116,34 @@ const make = Effect.gen(function* () {
       return yield* new CrewNativeControlError({ runId: input.crew.runId, operation });
   });
   return CrewNativeControl.of({
-    amend: (input) =>
+    prepareMessage: (input) =>
       Effect.scoped(
         Effect.gen(function* () {
+          if (input.nativeBusy)
+            return yield* new CrewNativeFollowupBusyError({ runId: input.crew.runId });
           const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-crew-amend-" });
           const textFile = path.join(directory, "message.txt");
-          yield* fs.writeFileString(textFile, input.text, { mode: 0o600 });
+          yield* fs.writeFileString(
+            textFile,
+            input.text.trim() ||
+              (input.attachmentCount > 0
+                ? `Human follow-up with ${input.attachmentCount} attached file(s); inspect the attachments in this native chat.`
+                : input.text),
+            { mode: 0o600 },
+          );
           const requestKey = Hex.encode(
             yield* crypto.digest("SHA-256", new TextEncoder().encode(input.requestId)),
           );
+          const attemptKey = Hex.encode(
+            yield* crypto.digest("SHA-256", new TextEncoder().encode(input.attemptId)),
+          );
+          const deliveryArgs = [
+            input.crew.runId,
+            "--request-id",
+            `t3-${requestKey}`,
+            "--attempt-id",
+            `t3-${attemptKey}`,
+          ];
           yield* invoke(input, "amend", [
             "t3-amend",
             input.crew.runId,
@@ -114,11 +152,25 @@ const make = Effect.gen(function* () {
             "--text-file",
             textFile,
           ]);
+          yield* invoke(input, "amend", ["t3-amend-prepare", ...deliveryArgs]);
+          return {
+            // Native acceptance is distinct from queueing. Retry only this exact
+            // receipt; a post-send failure must never fail or resend a live turn.
+            onPromptAccepted: invoke(input, "amend", ["t3-amend-ack", ...deliveryArgs]).pipe(
+              Effect.timeout("5 seconds"),
+              Effect.retry({ times: 2, schedule: Schedule.spaced("250 millis") }),
+              Effect.catchCause(() =>
+                Effect.logWarning("Crew prompt acknowledgment remains pending", {
+                  runId: input.crew.runId,
+                }),
+              ),
+            ),
+          };
         }),
       ).pipe(
         Effect.timeout("15 seconds"),
         Effect.mapError((cause) =>
-          isCrewNativeControlError(cause)
+          isCrewNativeControlError(cause) || isCrewNativeFollowupBusyError(cause)
             ? cause
             : new CrewNativeControlError({ runId: input.crew.runId, operation: "amend", cause }),
         ),

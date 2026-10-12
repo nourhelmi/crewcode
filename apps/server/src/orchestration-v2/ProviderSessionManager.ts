@@ -16,6 +16,7 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -178,6 +179,8 @@ export interface ProviderSessionManagerV2Shape {
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
   readonly release: (input: {
     readonly providerSessionId: ProviderSessionId;
+    /** Crew retirement requires proof of process scope closure, including prior timed-out releases. */
+    readonly requireClosed?: boolean;
     readonly reason: ProviderSessionReleaseReason;
     readonly detail?: string;
   }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
@@ -419,6 +422,15 @@ export const layerWithOptions = (
           }),
       );
       const sessions = yield* Ref.make(new Map<string, LiveSessionEntry>());
+      // Retain only pending/failed close outcomes. Removing a runtime from the live
+      // map is not proof its process exited; strict retirement must remain retryable.
+      const scopeClosures = new Map<
+        Scope.Closeable,
+        {
+          readonly providerSessionId: ProviderSessionId;
+          readonly result: Deferred.Deferred<Exit.Exit<void>>;
+        }
+      >();
       // One retry per released entry, so a later release with the same id
       // cannot drop cleanup for threads only the earlier session served.
       const releaseRecordRetries = yield* FiberSet.make();
@@ -881,6 +893,10 @@ export const layerWithOptions = (
               }
               const updated = new Map(current);
               updated.delete(key);
+              scopeClosures.set(existing.scope, {
+                providerSessionId: input.providerSessionId,
+                result: Deferred.makeUnsafe<Exit.Exit<void>>(),
+              });
               return ["removed", updated] as const;
             }),
             DateTime.now,
@@ -903,8 +919,20 @@ export const layerWithOptions = (
         annotations: { readonly providerSessionId?: ProviderSessionId; readonly reason: string },
       ) =>
         Effect.gen(function* () {
+          const closing = scopeClosures.get(scope);
           const closeFiber = yield* Scope.close(scope, Exit.void).pipe(
             Effect.exit,
+            Effect.tap((exit) =>
+              closing === undefined
+                ? Effect.void
+                : Deferred.succeed(closing.result, exit).pipe(
+                    Effect.andThen(
+                      Effect.sync(() => {
+                        if (Exit.isSuccess(exit)) scopeClosures.delete(scope);
+                      }),
+                    ),
+                  ),
+            ),
             Effect.forkDetach({ startImmediately: true }),
           );
           const closeExit = yield* Fiber.join(closeFiber).pipe(
@@ -935,6 +963,7 @@ export const layerWithOptions = (
 
       const releaseEntry = (input: {
         readonly providerSessionId: ProviderSessionId;
+        readonly requireClosed?: boolean;
         readonly reason: ProviderSessionReleaseReason;
         readonly detail?: string;
         readonly cancelIdleFiber?: boolean;
@@ -978,6 +1007,12 @@ export const layerWithOptions = (
                     yield* retryReleaseRecords(records);
                     return yield* recorded;
                   }
+                  if (Option.isNone(closeExit) && input.requireClosed === true)
+                    return yield* new ProviderSessionReleaseError({
+                      providerSessionId: input.providerSessionId,
+                      reason: input.reason,
+                      cause: "The provider process scope is still closing; retry Stop.",
+                    });
                   if (Option.isSome(closeExit) && Exit.isFailure(closeExit.value)) {
                     return yield* Effect.failCause(closeExit.value.cause);
                   }
@@ -2280,7 +2315,30 @@ export const layerWithOptions = (
                 }),
             ),
           ),
-        release: releaseEntry,
+        release: (input) =>
+          releaseEntry(input).pipe(
+            Effect.andThen(
+              Effect.gen(function* () {
+                if (input.requireClosed !== true) return;
+                for (const closing of scopeClosures.values()) {
+                  if (closing.providerSessionId !== input.providerSessionId) continue;
+                  const closed = yield* Deferred.await(closing.result).pipe(
+                    Effect.timeout(RELEASE_SCOPE_CLOSE_TIMEOUT_MS),
+                  );
+                  yield* closed;
+                }
+              }),
+            ),
+            Effect.catchCause((cause) =>
+              Effect.fail(
+                new ProviderSessionReleaseError({
+                  providerSessionId: input.providerSessionId,
+                  reason: input.reason,
+                  cause,
+                }),
+              ),
+            ),
+          ),
         detach: (input) =>
           Effect.gen(function* () {
             const key = sessionKey(input.providerSessionId);

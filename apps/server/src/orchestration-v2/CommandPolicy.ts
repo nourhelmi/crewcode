@@ -121,9 +121,8 @@ export function resolveMessageDispatchIntent(
   projection: OrchestrationV2ThreadProjection,
   requestedMode: MessageDispatchMode,
   deliveryIntent?: "auto" | "steer" | "restart",
+  createdBy?: "user" | "agent" | "system",
 ): MessageDispatchMode {
-  if (deliveryIntent === undefined) return requestedMode;
-
   const activeRun = projection.runs.findLast(
     (run) =>
       run.status === "preparing" ||
@@ -131,6 +130,11 @@ export function resolveMessageDispatchIntent(
       run.status === "running" ||
       run.status === "waiting",
   );
+  // A Crew revision can begin only after the previous native work is quiescent.
+  // Queueing preserves edits/cancellation without mutating the packet early.
+  if (projection.thread?.crew !== undefined && createdBy === "user" && activeRun !== undefined)
+    return { type: "queue_after_active" };
+  if (deliveryIntent === undefined) return requestedMode;
   if (activeRun === undefined) return { type: "start_immediately" };
   if (deliveryIntent === "steer") {
     return { type: "steer_active", targetRunId: activeRun.id };

@@ -653,46 +653,6 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const prepareCrewMessage = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
-    if (
-      command.type !== "message.dispatch" ||
-      command.createdBy !== "user" ||
-      (yield* hasReceipt(command.commandId))
-    )
-      return command;
-    const { thread } = yield* orchestrator.getThreadRecords(command.threadId, []);
-    if (!thread.crew) return command;
-    if (Option.isNone(crewControl))
-      return yield* new Orchestrator.OrchestratorDispatchError({
-        commandId: command.commandId,
-        commandType: command.type,
-        cause: "Crew packet amendment service is unavailable; retry after restarting the server.",
-      });
-    yield* crewControl.value
-      .amend({
-        crew: thread.crew,
-        providerInstanceId: thread.providerInstanceId,
-        requestId: command.commandId,
-        text:
-          command.text.trim() ||
-          (command.attachments.length > 0
-            ? `Human follow-up with ${command.attachments.length} attached file(s); inspect the attachments in this native chat.`
-            : command.text),
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) =>
-            new Orchestrator.OrchestratorDispatchError({
-              commandId: command.commandId,
-              commandType: command.type,
-              cause,
-            }),
-        ),
-      );
-    // The original user text remains the visible message; the durable amendment and
-    // unread inbox are authoritative when the worker's next native turn starts.
-    return command;
-  });
   const retireCrewThread = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
     if (
       command.type !== "thread.stop" &&
@@ -700,11 +660,14 @@ const make = Effect.gen(function* () {
       command.type !== "thread.delete"
     )
       return;
-    const stopped = yield* orchestrator.getThreadRecords(command.threadId, [
-      "providerThreads",
-      "runs",
-      "runtimeRequests",
-    ]);
+    const readStopped = () =>
+      orchestrator.getThreadRecords(command.threadId, [
+        "providerThreads",
+        "providerTurns",
+        "runs",
+        "runtimeRequests",
+      ]);
+    const stopped = yield* readStopped();
     const { thread, providerThreads } = stopped;
     if (!thread.crew) return;
     if (Option.isNone(crewControl))
@@ -713,49 +676,131 @@ const make = Effect.gen(function* () {
         commandType: command.type,
         cause: "Crew lifecycle service is unavailable; retry after restarting the server.",
       });
-    const fenced = yield* crewControl.value
-      .retire({ crew: thread.crew, providerInstanceId: thread.providerInstanceId })
-      .pipe(Effect.result);
-    // Crew-bound children have dedicated runtimes. Stop closes even a retained idle
-    // runtime, whose untracked subprocesses cannot be inferred from run status.
-    const busy =
-      latestActiveRun(stopped) !== undefined ||
-      stopped.runtimeRequests.some((request) => request.status === "pending") ||
-      providerThreads.some((row) => (row.pendingBackgroundTasks?.length ?? 0) > 0);
-    const detached = yield* Effect.forEach(
-      busy
-        ? []
-        : [
-            ...new Set(
-              providerThreads.flatMap((row) =>
-                row.providerSessionId ? [row.providerSessionId] : [],
-              ),
-            ),
-          ],
-      (providerSessionId) =>
-        sessions
-          .detach({
-            providerSessionId,
-            threadId: thread.id,
-            revokeMcpCredential: true,
-            detail: "Crew native worker stopped.",
+    const owner = { crew: thread.crew, providerInstanceId: thread.providerInstanceId };
+    const fenced = yield* crewControl.value.retire(owner).pipe(Effect.result);
+    const closed = yield* Effect.gen(function* () {
+      // Capture the cursor before interruption so terminal ingestion cannot race the wait.
+      const afterSequence = yield* orchestrator.getThreadEventSequence(thread.id);
+      const liveProviderThreads: Array<(typeof providerThreads)[number]["id"]> = [];
+      for (const providerThread of providerThreads) {
+        if (providerThread.providerSessionId === null) continue;
+        const runtime = yield* sessions.get(providerThread.providerSessionId);
+        if (Option.isNone(runtime)) continue;
+        liveProviderThreads.push(providerThread.id);
+        const turn = stopped.providerTurns
+          .filter((candidate) => candidate.providerThreadId === providerThread.id)
+          .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+        if (turn === undefined) continue;
+        // A cascade can occupy an outbox worker itself. Interrupt directly rather
+        // than waiting for another worker to execute the already-committed effect.
+        yield* runtime.value
+          .interruptTurn({
+            providerThread,
+            providerTurnId: turn.id,
+            requestRuntimeRestart: true,
           })
-          .pipe(Effect.result),
-    );
-    const failed =
-      fenced._tag === "Failure" ? fenced : detached.find((result) => result._tag === "Failure");
+          .pipe(
+            Effect.timeout("15 seconds"),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Crew native interrupt raced terminal delivery", {
+                threadId: thread.id,
+                providerTurnId: turn.id,
+                cause,
+              }),
+            ),
+          );
+      }
+      const quiescent = (current: typeof stopped) =>
+        !current.providerTurns.some(
+          (turn) =>
+            liveProviderThreads.includes(turn.providerThreadId) && turn.status === "running",
+        ) &&
+        !current.runs.some(
+          (run) =>
+            run.providerThreadId !== null &&
+            liveProviderThreads.includes(run.providerThreadId) &&
+            isActiveRun(run),
+        );
+      if (!quiescent(yield* readStopped())) {
+        yield* orchestrator.streamStoredEventsFrom({ threadId: thread.id, afterSequence }).pipe(
+          Stream.filter((stored) =>
+            ["run.updated", "provider-turn.updated"].includes(stored.event.type),
+          ),
+          Stream.mapEffect(readStopped),
+          Stream.filter(quiescent),
+          Stream.runHead,
+          Effect.timeout("15 seconds"),
+        );
+      }
+      if (!quiescent(yield* readStopped()))
+        return yield* new Orchestrator.OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Crew native turn has not finished stopping; retry Stop.",
+        });
+      // Crew-bound threads have dedicated session IDs even when the driver supports
+      // shared runtimes. Unsubscribe alone would leave the Codex process alive.
+      for (const providerSessionId of new Set(
+        providerThreads.flatMap((row) => (row.providerSessionId ? [row.providerSessionId] : [])),
+      )) {
+        yield* sessions.detach({
+          providerSessionId,
+          threadId: thread.id,
+          revokeMcpCredential: true,
+          detail: "Crew native worker stopped.",
+        });
+        yield* sessions.release({
+          providerSessionId,
+          requireClosed: true,
+          reason: "manual_shutdown",
+          detail: "Crew native worker stopped.",
+        });
+      }
+      // After the owning processes are gone, settle background/request projections
+      // that cannot receive any more terminal events from those processes.
+      for (const providerThread of providerThreads) {
+        const turn = stopped.providerTurns
+          .filter((candidate) => candidate.providerThreadId === providerThread.id)
+          .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+        if (turn === undefined) continue;
+        yield* orchestrator.dispatch({
+          type: "thread.background-work.settle",
+          commandId: CommandId.make(`${command.commandId}:crew-closed:${providerThread.id}`),
+          threadId: thread.id,
+          providerThreadId: providerThread.id,
+          providerTurnId: turn.id,
+        });
+      }
+    }).pipe(Effect.result);
+    // Confirmation retires the whole Crew subtree, so every native descendant must
+    // close first. A failure still lets the other branches receive their Stop.
+    const descendants = yield* stopDelegatedTasks({
+      threadId: thread.id,
+      commandId: command.commandId,
+      reason: "Crew native worker stopped.",
+    }).pipe(Effect.result);
+    const failed = [fenced, closed, descendants].find((result) => result._tag === "Failure");
     if (failed?._tag === "Failure")
       return yield* new Orchestrator.OrchestratorDispatchError({
         commandId: command.commandId,
         commandType: command.type,
         cause: failed.failure,
       });
+    yield* crewControl.value.confirmStopped(owner).pipe(
+      Effect.mapError(
+        (cause) =>
+          new Orchestrator.OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause,
+          }),
+      ),
+    );
   });
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     ensureCommandTranscripts(command).pipe(
       Effect.andThen(assertDispatchTargetEnabled(command)),
-      Effect.andThen(prepareCrewMessage(command)),
-      Effect.flatMap(orchestrator.dispatch),
+      Effect.andThen(orchestrator.dispatch(command)),
       // Cleanup retries even when the command replays an existing receipt. The
       // committed outbox already owns native cancellation before metadata retires.
       Effect.tap(() => retireCrewThread(command)),
@@ -1179,9 +1224,12 @@ const make = Effect.gen(function* () {
       const failures: Array<
         Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
       > = [];
+      const visited = new Set<ThreadId>();
       for (const task of subagents) {
         if (task.origin !== "app_owned" || task.childThreadId === null) continue;
         const threadId = task.childThreadId;
+        if (visited.has(threadId)) continue;
+        visited.add(threadId);
         yield* dispatch({
           type: "thread.stop",
           commandId: CommandId.make(`${input.commandId}:stop:${threadId}`),
@@ -1190,7 +1238,10 @@ const make = Effect.gen(function* () {
         }).pipe(
           Effect.result,
           Effect.flatMap((stopped) =>
-            stopDelegatedTasks({ ...input, threadId }).pipe(
+            orchestrator.getThreadRecords(threadId, []).pipe(
+              Effect.flatMap((child) =>
+                child.thread.crew ? Effect.void : stopDelegatedTasks({ ...input, threadId }),
+              ),
               Effect.result,
               Effect.flatMap((descendants) =>
                 stopped._tag === "Failure"

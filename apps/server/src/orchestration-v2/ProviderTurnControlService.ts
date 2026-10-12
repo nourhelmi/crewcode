@@ -16,6 +16,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as CrewNativeControl from "../provider/CrewNativeControl.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 
 const yieldToRuntime = Effect.yieldNow.pipe(
@@ -329,6 +330,13 @@ export const layer: Layer.Layer<
               operation: "steer",
               providerTurnId: input.providerTurnId,
               cause: "The persisted steering message or target run is missing.",
+            });
+          }
+          const thread =
+            message.createdBy === "user" ? yield* projections.getThread(input.threadId) : undefined;
+          if (thread?.crew !== undefined) {
+            return yield* new CrewNativeControl.CrewNativeFollowupBusyError({
+              runId: thread.crew.runId,
             });
           }
           yield* loaded.session.value

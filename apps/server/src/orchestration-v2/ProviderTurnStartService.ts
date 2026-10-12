@@ -25,6 +25,7 @@ import * as Schema from "effect/Schema";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
+import * as CrewNativeControl from "../provider/CrewNativeControl.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import {
@@ -111,6 +112,7 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+    const crewControl = yield* Effect.serviceOption(CrewNativeControl.CrewNativeControl);
 
     // These callbacks outlive startup while a run drains background work. Build
     // them outside start's scope so they cannot retain its full thread history.
@@ -1168,6 +1170,34 @@ export const layer: Layer.Layer<
           });
           if (!(yield* isCurrentAttemptInStatus("running"))) return;
           const start = compact ? session.compactThread! : session.startTurn;
+          const nativeGoalControl =
+            session.driver === "codex" &&
+            message.attachments.length === 0 &&
+            /^\/goal(?:\s+(?:edit|clear|pause|resume))?$/iu.test(message.text.trim());
+          const crewDelivery =
+            !compact &&
+            !nativeGoalControl &&
+            projection.thread.crew !== undefined &&
+            message.createdBy === "user"
+              ? yield* Option.isSome(crewControl)
+                  ? crewControl.value.prepareMessage({
+                      crew: projection.thread.crew,
+                      providerInstanceId: run.providerInstanceId,
+                      requestId: message.id,
+                      attemptId: attempt.id,
+                      text: message.text,
+                      attachmentCount: message.attachments.length,
+                      nativeBusy:
+                        (yield* session.hasActiveTurn ?? Effect.succeed(true)) ||
+                        (yield* session.hasPendingBackgroundWork ?? Effect.succeed(true)),
+                    })
+                  : Effect.fail(
+                      new CrewNativeControl.CrewNativeControlError({
+                        runId: projection.thread.crew.runId,
+                        operation: "amend",
+                      }),
+                    )
+              : undefined;
           const context = [delivery.context, restartNote]
             .filter((part) => part !== "")
             .join("\n\n");
@@ -1175,6 +1205,7 @@ export const layer: Layer.Layer<
           const { restartContinuationOfRunId: _resumedRunId, ...promptedInput } = turnInput;
           yield* start({
             ...(noteContinuation ? promptedInput : turnInput),
+            ...(crewDelivery === undefined ? {} : crewDelivery),
             message: {
               ...turnInput.message,
               text: context === "" ? userText : `${context}\n\nUser message:\n${userText}`,
@@ -1218,6 +1249,7 @@ export const layer: Layer.Layer<
           ),
         );
       const deliverySession =
+        !(projection.thread.crew !== undefined && message.createdBy === "user") &&
         effectiveHandoffs.length === 0 &&
         missedItems.length === 0 &&
         restartNote === "" &&
