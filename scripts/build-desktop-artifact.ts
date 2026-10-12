@@ -56,7 +56,7 @@ import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
-const DESKTOP_APP_ID = "com.t3tools.t3code";
+const DESKTOP_APP_ID = "com.nourhelmi.crewcode";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -971,6 +971,10 @@ export const DESKTOP_FILE_EXCLUSIONS = [
   "!**/node_modules/@cursor/sdk-*/**/*",
   "!apps/desktop/prod-resources/cursor-sdk",
   "!apps/desktop/prod-resources/cursor-sdk/**/*",
+  "!apps/desktop/resources/crewcode",
+  "!apps/desktop/resources/crewcode/**/*",
+  "!apps/desktop/prod-resources/crewcode",
+  "!apps/desktop/prod-resources/crewcode/**/*",
   // T3 Code always passes the user's installed Claude executable to the SDK,
   // so the SDK's optional platform packages (each a ~200MB bundled executable)
   // are dead weight. The trailing dash keeps the SDK's own JS package.
@@ -1105,6 +1109,10 @@ export const WSL_RUNTIME_EXTRA_RESOURCES = [
   WSL_RUNTIME_ARCHIVE_HASH_EXTRA_RESOURCE,
 ] as const;
 export const DESKTOP_EXTRA_RESOURCES = [
+  {
+    from: "apps/desktop/prod-resources/crewcode",
+    to: "crewcode",
+  },
   {
     from: "apps/desktop/prod-resources/cursor-sdk",
     to: "node_modules/@cursor",
@@ -2668,15 +2676,10 @@ export function resolveDesktopRuntimeDependencies(
 export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
   updateChannel: "latest" | "nightly",
 ) {
-  const env = yield* Config.all({
-    updateRepository: Config.String("T3CODE_DESKTOP_UPDATE_REPOSITORY").pipe(Config.option),
-    githubRepository: Config.String("GITHUB_REPOSITORY").pipe(Config.option),
-  });
-  const rawRepo = (
-    Option.getOrUndefined(env.updateRepository)?.trim() ||
-    Option.getOrUndefined(env.githubRepository)?.trim() ||
-    ""
-  ).trim();
+  // A fork must not inherit the upstream updater just because a CI job sets
+  // GITHUB_REPOSITORY. Updates require an explicit release-feed opt-in.
+  const repository = yield* Config.String("T3CODE_DESKTOP_UPDATE_REPOSITORY").pipe(Config.option);
+  const rawRepo = Option.getOrUndefined(repository)?.trim() ?? "";
   if (!rawRepo) return undefined;
 
   const [owner, repo, ...rest] = rawRepo.split("/");
@@ -2745,9 +2748,27 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
 
 export function resolveDesktopProductName(version: string): string {
   return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code");
+    ? "CrewCode Nightly"
+    : (desktopPackageJson.productName ?? "CrewCode");
 }
+
+// Keep the ACP command outside asar: it runs in a separate Node process and
+// must remain usable after the source checkout is moved or removed.
+export const stageCrewCodeBridge = Effect.fn("stageCrewCodeBridge")(function* (input: {
+  readonly repoRoot: string;
+  readonly stageResourcesDir: string;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const destination = path.join(input.stageResourcesDir, "crewcode");
+  yield* fs.makeDirectory(destination, { recursive: true });
+  for (const file of ["acp.mjs", "crew-client.mjs"]) {
+    yield* fs.copyFile(
+      path.join(input.repoRoot, "scripts/crewcode", file),
+      path.join(destination, file),
+    );
+  }
+});
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   platform: typeof BuildPlatform.Type,
@@ -2771,7 +2792,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
     productName: resolveDesktopProductName(version),
-    artifactName: "T3-Code-${version}-${arch}.${ext}",
+    artifactName: "CrewCode-${version}-${arch}.${ext}",
+    // null prevents electron-builder from inferring a feed from CI metadata.
+    publish: null,
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [
       ...DESKTOP_FILE_EXCLUSIONS,
@@ -3734,6 +3757,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* Effect.log("[desktop-artifact] Staging release app...");
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
+  yield* stageCrewCodeBridge({ repoRoot, stageResourcesDir });
   if (options.platform === "linux") {
     const extensionDir = path.join(stageAppDir, "apps/desktop/gnome-extension");
     yield* fs.makeDirectory(extensionDir, { recursive: true });
@@ -3858,7 +3882,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
       : undefined;
   const stagePackageJson: StagePackageJson = {
-    name: "t3code",
+    name: "crewcode",
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,
@@ -3866,11 +3890,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     ...(macWebAuthn ? { t3codeWebAuthn: macWebAuthn } : {}),
     private: true,
     packageManager: rootPackageJson.packageManager,
-    description:
-      "T3 Code is an open-source desktop app for coding agents. Work with your existing agent subscriptions, review code changes, and run commands in your projects. Connect from desktop, web, or mobile to continue working remotely.",
+    description: "CrewCode is a desktop workspace for Crew advisors and workers, built on T3 Code.",
     license: "MIT",
     // Required by the .deb control file.
-    homepage: "https://t3.codes",
+    homepage: "https://github.com/nourhelmi/crewcode",
     author: "T3 Tools",
     main: "apps/desktop/dist-electron/boot.cjs",
     build: yield* createBuildConfig(

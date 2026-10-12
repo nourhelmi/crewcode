@@ -2,14 +2,18 @@
 
 T3 Code's workspace, powered by [Crew](https://github.com/nourhelmi/crew). Crew routes the advisor and workers across your installed coding agents; the app provides projects, conversations, diffs, terminals, and checkpoints.
 
+Open **CrewCode.app** from Applications, add a project, and start a conversation with **Crew · automatic routing**. The desktop app starts its own local server; no browser or separate server command is required. Crew and its authenticated host CLIs remain installed separately.
+
+To build the unsigned macOS app from this checkout:
+
 ```bash
 pnpm install --frozen-lockfile
-pnpm crewcode --crew /absolute/path/to/crew/bin/crew
+pnpm crewcode:build:mac
 ```
 
-Requires Node 24.13.1 or newer in the 24.x line, pnpm 11, and an installed Crew with authenticated host CLIs. The launcher creates a separate `.crewcode` data directory, registers the local Crew provider, and selects automatic Crew routing. Open the web address printed by the dev runner.
+Extract the ZIP in `release/` and move `CrewCode.app` to Applications. Building requires Node 24.13.1 or newer in the 24.x line, pnpm 11, Xcode Command Line Tools, and Rust. Desktop data lives in `~/.crewcode`, separate from T3 Code.
 
-See [CrewCode setup and capabilities](docs/user/crewcode.md). This first integration uses ACP and is a source-run web app; it does not include repackaged desktop or mobile releases. The upstream MIT license and attribution are retained below.
+The web development launcher remains available as `pnpm crewcode --crew /absolute/path/to/crew/bin/crew`, using this checkout's `.crewcode` data directory. See [CrewCode setup and capabilities](docs/user/crewcode.md). Local builds do not update from upstream T3 Code releases. The upstream MIT license and attribution are retained below.
 
 ## Upstream T3 Code
 

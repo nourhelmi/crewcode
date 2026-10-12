@@ -7,17 +7,9 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
 import * as DesktopPreReadyFileSystem from "./DesktopPreReadyFileSystem.ts";
-import * as DesktopUserData from "./DesktopUserData.ts";
-
-const resolveWindowsUserData = (appDataDirectory: string) =>
-  DesktopUserData.resolveUserDataPath({
-    appDataDirectory,
-    isDevelopment: false,
-    platform: "win32",
-  }).pipe(Effect.provide(DesktopPreReadyFileSystem.layer));
 
 it.layer(NodeServices.layer)("DesktopPreReadyFileSystem", (it) => {
-  it.effect("migrates the legacy Windows profile state", () =>
+  it.effect("reads startup files synchronously", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -25,10 +17,10 @@ it.layer(NodeServices.layer)("DesktopPreReadyFileSystem", (it) => {
       yield* fileSystem.makeDirectory(path.join(root, "T3 Code (Alpha)"));
       yield* fileSystem.writeFileString(path.join(root, "T3 Code (Alpha)", "Local State"), "keys");
 
-      const userData = yield* resolveWindowsUserData(root);
-
-      assert.equal(userData, path.join(root, "t3code-v2"));
-      assert.equal(yield* fileSystem.readFileString(path.join(userData, "Local State")), "keys");
+      const contents = yield* FileSystem.FileSystem.use((fs) =>
+        fs.readFileString(path.join(root, "T3 Code (Alpha)", "Local State")),
+      ).pipe(Effect.provide(DesktopPreReadyFileSystem.layer));
+      assert.equal(contents, "keys");
     }),
   );
 
@@ -41,7 +33,11 @@ it.layer(NodeServices.layer)("DesktopPreReadyFileSystem", (it) => {
         yield* fileSystem.chmod(root, 0o000);
         yield* Effect.addFinalizer(() => fileSystem.chmod(root, 0o700).pipe(Effect.orDie));
 
-        const exit = yield* Effect.exit(resolveWindowsUserData(root));
+        const exit = yield* Effect.exit(
+          FileSystem.FileSystem.use((fs) => fs.exists(`${root}/Local State`)).pipe(
+            Effect.provide(DesktopPreReadyFileSystem.layer),
+          ),
+        );
 
         assert.isTrue(Exit.isFailure(exit));
       }),

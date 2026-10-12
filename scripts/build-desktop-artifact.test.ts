@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
 
@@ -64,6 +65,7 @@ import {
   resolveMockUpdateServerPort,
   resolveMockUpdateServerUrl,
   resolvePackageManagerUserAgent,
+  stageCrewCodeBridge,
   stageLinuxIconSize,
   stageDesktopDmgBackground,
   stageResourceMonitor,
@@ -273,8 +275,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
-    assert.equal(resolveDesktopProductName("0.0.17"), "T3 Code (Alpha)");
-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Nightly)");
+    assert.equal(resolveDesktopProductName("0.0.17"), "CrewCode");
+    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "CrewCode Nightly");
   });
 
   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
@@ -303,7 +305,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
               env: {
-                T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code",
+                T3CODE_DESKTOP_UPDATE_REPOSITORY: "nourhelmi/crewcode",
               },
             }),
           ),
@@ -314,7 +316,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
               env: {
-                GITHUB_REPOSITORY: "pingdotgg/t3code",
+                T3CODE_DESKTOP_UPDATE_REPOSITORY: "nourhelmi/crewcode",
               },
             }),
           ),
@@ -323,14 +325,14 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
       assert.deepStrictEqual(latestConfig, {
         provider: "github",
-        owner: "pingdotgg",
-        repo: "t3code",
+        owner: "nourhelmi",
+        repo: "crewcode",
         releaseType: "release",
       });
       assert.deepStrictEqual(nightlyConfig, {
         provider: "github",
-        owner: "pingdotgg",
-        repo: "t3code",
+        owner: "nourhelmi",
+        repo: "crewcode",
         releaseType: "prerelease",
         channel: "nightly",
       });
@@ -368,22 +370,91 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         undefined,
       );
 
-      assert.notProperty(preview, "publish");
-      assert.notProperty(previewChannel, "publish");
+      assert.isNull(preview.publish);
+      assert.isNull(previewChannel.publish);
       assert.deepStrictEqual(release.publish, [
         {
           provider: "github",
-          owner: "pingdotgg",
-          repo: "t3code",
+          owner: "nourhelmi",
+          repo: "crewcode",
           releaseType: "release",
         },
       ]);
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(
-          ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "pingdotgg/t3code" } }),
+          ConfigProvider.fromEnv({
+            env: { T3CODE_DESKTOP_UPDATE_REPOSITORY: "nourhelmi/crewcode" },
+          }),
         ),
       ),
+    ),
+  );
+
+  it.effect("keeps CrewCode builds off ambient upstream update feeds", () =>
+    Effect.gen(function* () {
+      const feed = yield* resolveGitHubPublishConfig("latest");
+      const config = yield* createBuildConfig(
+        "mac",
+        "zip",
+        "0.0.45",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      assert.isUndefined(feed);
+      assert.isNull(config.publish);
+      assert.equal(config.appId, "com.nourhelmi.crewcode");
+      assert.equal(config.productName, "CrewCode");
+      assert.include(config.extraResources as unknown[], DESKTOP_EXTRA_RESOURCES[0]);
+      assert.deepStrictEqual(DESKTOP_EXTRA_RESOURCES[0], {
+        from: "apps/desktop/prod-resources/crewcode",
+        to: "crewcode",
+      });
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: { GITHUB_REPOSITORY: "pingdotgg/t3code" },
+          }),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("runs the staged Crew bridge without the source checkout or dependencies", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const stageResourcesDir = yield* fs
+          .makeTempDirectoryScoped({ prefix: "crewcode-bridge-" })
+          .pipe(Effect.flatMap(fs.realPath));
+        const repoRoot = yield* path.fromFileUrl(new URL("..", import.meta.url));
+        yield* stageCrewCodeBridge({ repoRoot, stageResourcesDir });
+        const output = NodeChildProcess.execFileSync(
+          process.execPath,
+          [path.join(stageResourcesDir, "crewcode/acp.mjs")],
+          {
+            cwd: stageResourcesDir,
+            env: { ...process.env, CREWCODE_HOME: path.join(stageResourcesDir, "state") },
+            input:
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: 1,
+                method: "initialize",
+                params: { protocolVersion: 1 },
+              }) + "\n",
+            encoding: "utf8",
+            timeout: 10_000,
+          },
+        );
+        const reply = JSON.parse(output);
+        assert.equal(reply.id, 1);
+        assert.equal(reply.result.agentInfo.name, "crewcode");
+        assert.equal(reply.result.protocolVersion, 1);
+      }),
     ),
   );
 
@@ -598,6 +669,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "!**/node_modules/@cursor/sdk-*/**/*",
       "!apps/desktop/prod-resources/cursor-sdk",
       "!apps/desktop/prod-resources/cursor-sdk/**/*",
+      "!apps/desktop/resources/crewcode",
+      "!apps/desktop/resources/crewcode/**/*",
+      "!apps/desktop/prod-resources/crewcode",
+      "!apps/desktop/prod-resources/crewcode/**/*",
       "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
       "!**/*.map",
       "!**/*.d.cts",
@@ -702,7 +777,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         "**/*.map",
       ]);
       assert.deepStrictEqual(mac.dmg, {
-        title: "T3 Code (Alpha) 1.2.3 Installer",
+        title: "CrewCode 1.2.3 Installer",
         background: "dmg/dmg-background-latest.png",
         window: { width: 640, height: 432 },
         contents: [
@@ -1945,7 +2020,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
 
     assert.deepStrictEqual(configuration, {
-      appId: "com.t3tools.t3code",
+      appId: "com.nourhelmi.crewcode",
       teamId: "ABC1234567",
       rpDomains: ["example.clerk.accounts.dev"],
       provisioningProfilePath: "/tmp/t3code.provisionprofile",
@@ -1968,7 +2043,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "clerk.example.com",
       "example.clerk.accounts.dev",
     ]);
-    assert.include(entitlements, "<string>ABC1234567.com.t3tools.t3code</string>");
+    assert.include(entitlements, "<string>ABC1234567.com.nourhelmi.crewcode</string>");
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
@@ -1977,7 +2052,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
 
   it("grants in-app browser passkey entitlements only when the provisioning profile does", () => {
-    const configuration = { appId: "com.t3tools.t3code", teamId: "ABC1234567" };
+    const configuration = { appId: "com.nourhelmi.crewcode", teamId: "ABC1234567" };
     // Profiles are CMS envelopes around a plain XML plist.
     const profile = (entitlements: string, outside = "") =>
       `0\x82\x1f\x9a\x06\t*\x86H<?xml version="1.0"?><plist version="1.0"><dict>${outside}<key>Entitlements</key><dict>${entitlements}</dict></dict></plist>\x00\x01`;
@@ -2022,7 +2097,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         configuration,
       ),
       {
-        touchIdKeychainAccessGroup: "ABC1234567.com.t3tools.t3code.webauthn",
+        touchIdKeychainAccessGroup: "ABC1234567.com.nourhelmi.crewcode.webauthn",
         browserPasskeys: true,
       },
     );
@@ -2038,7 +2113,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     );
     assert.match(
       entitlements,
-      /<key>keychain-access-groups<\/key>\s*<array>\s*<string>ABC1234567\.com\.t3tools\.t3code\.webauthn<\/string>\s*<\/array>/u,
+      /<key>keychain-access-groups<\/key>\s*<array>\s*<string>ABC1234567\.com\.nourhelmi\.crewcode\.webauthn<\/string>\s*<\/array>/u,
     );
     assert.match(
       entitlements,
@@ -2135,7 +2210,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       });
 
       const mac = config.mac as Record<string, unknown>;
-      assert.equal(config.appId, "com.t3tools.t3code");
+      assert.equal(config.appId, "com.nourhelmi.crewcode");
       assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
       assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
       assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
@@ -2187,6 +2262,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("stages the resource monitor as an external executable resource", () => {
     assert.deepStrictEqual(DESKTOP_EXTRA_RESOURCES, [
+      {
+        from: "apps/desktop/prod-resources/crewcode",
+        to: "crewcode",
+      },
       {
         from: "apps/desktop/prod-resources/cursor-sdk",
         to: "node_modules/@cursor",

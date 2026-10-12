@@ -14,7 +14,6 @@ import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopAssets from "./DesktopAssets.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
-import * as DesktopUserData from "./DesktopUserData.ts";
 
 const defaultEnvironmentInput = {
   dirname: "/repo/apps/desktop/dist-electron",
@@ -147,25 +146,25 @@ const withIdentity = <A, E, R>(
 };
 
 describe("DesktopAppIdentity", () => {
-  it.effect("isolates the V2 profile even when the legacy V1 profile exists", () =>
+  it.effect("isolates the CrewCode profile even when a T3 Code profile exists", () =>
     withIdentity(
       Effect.gen(function* () {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         const userDataPath = yield* identity.resolveUserDataPath;
 
-        assert.equal(userDataPath, "/Users/alice/Library/Application Support/t3code-v2");
+        assert.equal(userDataPath, "/Users/alice/Library/Application Support/crewcode");
       }),
       { legacyPathExists: true },
     ),
   );
 
-  it.effect("keeps using the legacy development profile", () =>
+  it.effect("isolates the CrewCode development profile", () =>
     withIdentity(
       Effect.gen(function* () {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         assert.equal(
           yield* identity.resolveUserDataPath,
-          "/Users/alice/Library/Application Support/T3 Code (Dev)",
+          "/Users/alice/Library/Application Support/crewcode-dev",
         );
       }),
       {
@@ -175,35 +174,25 @@ describe("DesktopAppIdentity", () => {
     ),
   );
 
-  it.effect("preserves failures while inspecting the legacy userData path", () => {
-    const legacyPath = "/Users/alice/Library/Application Support/T3 Code (Dev)";
-    const cause = PlatformError.systemError({
-      _tag: "PermissionDenied",
-      module: "FileSystem",
-      method: "exists",
-      description: "permission denied",
-      pathOrDescriptor: legacyPath,
-    });
-
-    return withIdentity(
+  it.effect("does not inspect another app's profile", () =>
+    withIdentity(
       Effect.gen(function* () {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
-        const error = yield* identity.resolveUserDataPath.pipe(Effect.flip);
-
-        assert.instanceOf(error, DesktopUserData.DesktopUserDataInitializationError);
-        assert.equal(error.resourcePath, legacyPath);
-        assert.strictEqual(error.cause, cause);
         assert.equal(
-          error.message,
-          `Could not initialize Electron user data during inspect at ${legacyPath} (PermissionDenied).`,
+          yield* identity.resolveUserDataPath,
+          "/Users/alice/Library/Application Support/crewcode-dev",
         );
       }),
       {
-        legacyPathProbeError: cause,
+        legacyPathProbeError: PlatformError.systemError({
+          _tag: "PermissionDenied",
+          module: "FileSystem",
+          method: "exists",
+        }),
         environment: { env: { VITE_DEV_SERVER_URL: "http://localhost:5173" } },
       },
-    );
-  });
+    ),
+  );
 
   it.effect("configures app identity from the environment commit override", () => {
     const calls: ElectronAppCalls = {
@@ -217,8 +206,8 @@ describe("DesktopAppIdentity", () => {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         yield* identity.configure;
 
-        assert.deepEqual(calls.setName, ["T3 Code Alpha"]);
-        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "T3 Code (Alpha)");
+        assert.deepEqual(calls.setName, ["CrewCode"]);
+        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "CrewCode");
         assert.equal(calls.setAboutPanelOptions[0]?.applicationVersion, "1.2.3");
         assert.equal(calls.setAboutPanelOptions[0]?.version, "0123456789ab");
         // Packaged: the bundle's own icon stands, so a custom one the user
@@ -261,10 +250,10 @@ describe("DesktopAppIdentity", () => {
 
         const runtimeName = calls.setName[0];
         assert.isDefined(runtimeName);
-        assert.equal(runtimeName, `T3 Code ${stage}`);
+        assert.equal(runtimeName, stage === "Alpha" ? "CrewCode" : `CrewCode ${stage}`);
         // RFC 9110's token grammar, after Electron removes ASCII spaces.
         assert.match(runtimeName.replaceAll(" ", ""), /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/);
-        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, `T3 Code (${stage})`);
+        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, runtimeName);
       }),
       { calls, environment },
     );
