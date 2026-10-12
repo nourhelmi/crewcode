@@ -2507,68 +2507,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
 
-  it.effect("rejected stale Stop leaves the current native root's Crew workers running", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-crew-stale-stop-" });
-        const command = path.join(home, "crew.mjs");
-        const metaPath = path.join(home, "runs", "worker", "meta.json");
-        yield* fs.makeDirectory(path.join(home, "runs", "worker"), { recursive: true });
-        yield* fs.writeFileString(
-          command,
-          `#!${yield* HostProcess.ExecutablePath}\n` +
-            `import fs from 'node:fs'; import path from 'node:path';
-const home=process.env.CREW_HOME; fs.appendFileSync(path.join(home,'calls'),'stop\\n');
-const p=path.join(home,'runs','worker','meta.json'); const r=JSON.parse(fs.readFileSync(p,'utf8')); r.state='stopped'; fs.writeFileSync(p,JSON.stringify(r));\n`,
-        );
-        yield* fs.chmod(command, 0o700);
-        yield* fs.writeFileString(
-          metaPath,
-          JSON.stringify({
-            id: "worker",
-            name: "worker",
-            role: "builder",
-            cwd: home,
-            createdAt: "1970-01-01T00:00:00.000Z",
-            state: "running",
-            parent: { mailbox: `claude-${WAKE_NATIVE_SESSION}` },
-            route: { host: "codex", model: "gpt-test", effort: "high" },
-          }),
-        );
-        const harness = yield* makeWakeHarnessWithOptions({
-          environment: { CREW_HOME: home, CREWCODE_CREW_BIN: command },
-          close: Queue.shutdown,
-        });
-        yield* harness.runtime.startTurn(
-          makeClaudeTestTurnInput({
-            threadId: harness.threadId,
-            providerThread: harness.providerThread,
-            now: yield* DateTime.now,
-            attemptId: RunAttemptId.make("crew-current-turn"),
-            text: "Continue owned work.",
-            attachments: [],
-          }),
-        );
-        const stale = yield* Effect.result(
-          harness.runtime.interruptTurn({
-            providerThread: harness.providerThread,
-            providerTurnId: ProviderTurnId.make("stale-prior-turn"),
-          }),
-        );
-        assert.equal(stale._tag, "Failure");
-        assert.isFalse(yield* fs.exists(path.join(home, "calls")));
-        assert.include(yield* fs.readFileString(metaPath), '\"state\":\"running\"');
-        assert.isTrue(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
-    ),
-  );
-
   it.effect.each([
     { isError: false, title: "Check weather" },
     { isError: true, title: "Check weather" },
@@ -6064,84 +6002,6 @@ const p=path.join(home,'runs','worker','meta.json'); const r=JSON.parse(fs.readF
     ),
   );
 
-  it.effect(
-    "acknowledges exact native prompt receipts, including steers, rather than queue offers",
-    () =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const harness = yield* makeWakeHarness;
-          const accepted: string[] = [];
-          assert.isFalse(yield* harness.runtime.hasActiveTurn!);
-          const input = makeClaudeTestTurnInput({
-            threadId: harness.threadId,
-            providerThread: harness.providerThread,
-            now: yield* DateTime.now,
-            attemptId: RunAttemptId.make("acceptance-boundary"),
-            text: "Do the first task.",
-            attachments: [],
-          });
-          yield* harness.runtime.startTurn({
-            ...input,
-            onPromptAccepted: Effect.sync(() => {
-              accepted.push("start");
-            }),
-          });
-          const receipt = (uuid: string, state: string) =>
-            claudeSdkFrame({
-              type: "command_lifecycle",
-              command_uuid: uuid,
-              state,
-              uuid: "00000000-0000-4000-8000-000000000891",
-              session_id: WAKE_NATIVE_SESSION,
-            });
-          assert.isTrue(yield* harness.runtime.hasActiveTurn!);
-          assert.deepEqual(accepted, []);
-          yield* harness.offerAndWait(receipt(harness.promptUuid(0), "queued"));
-          yield* harness.offerAndWait(receipt("unrelated-prompt", "started"));
-          assert.deepEqual(accepted, []);
-          yield* harness.offerAndWait(receipt(harness.promptUuid(0), "started"));
-          yield* harness.offerAndWait(receipt(harness.promptUuid(0), "started"));
-          assert.deepEqual(accepted, ["start"]);
-          yield* harness.runtime.steerTurn({
-            threadId: harness.threadId,
-            runId: input.runId,
-            providerThread: harness.providerThread,
-            providerTurnId: (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
-              driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
-              nativeTurnId: `turn:${input.attemptId}`,
-            }),
-            message: {
-              ...input.message,
-              messageId: MessageId.make("acceptance-steer"),
-              text: "Use Green.",
-            },
-            onPromptAccepted: Effect.sync(() => {
-              accepted.push("steer");
-            }),
-          });
-          assert.deepEqual(accepted, ["start"]);
-          assert.notEqual(harness.promptUuid(1), harness.promptUuid(0));
-          yield* harness.offerAndWait(receipt(harness.promptUuid(1), "queued"));
-          assert.deepEqual(accepted, ["start"]);
-          yield* harness.offerAndWait(
-            claudeSdkFrame({
-              ...makeAssistantTextFrame({
-                uuid: "00000000-0000-4000-8000-000000000892",
-                text: "Using Green.",
-              }),
-              user_message_uuid: harness.promptUuid(1),
-            }),
-          );
-          yield* harness.offerAndWait(receipt(harness.promptUuid(1), "started"));
-          assert.deepEqual(accepted, ["start", "steer"]);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
-      ),
-  );
-
   it.effect("fails a prompt Claude completes without starting a turn for it", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -6149,9 +6009,8 @@ const p=path.join(home,'runs','worker','meta.json'); const r=JSON.parse(fs.readF
         // a lone completed lifecycle frame and never runs a turn for it.
         const harness = yield* makeWakeHarness;
         const now = yield* DateTime.now;
-        let accepted = false;
-        yield* harness.runtime.startTurn({
-          ...makeClaudeTestTurnInput({
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
             threadId: harness.threadId,
             providerThread: harness.providerThread,
             now,
@@ -6159,10 +6018,7 @@ const p=path.join(home,'runs','worker','meta.json'); const r=JSON.parse(fs.readF
             text: "Bump this PR to the latest main.",
             attachments: [],
           }),
-          onPromptAccepted: Effect.sync(() => {
-            accepted = true;
-          }),
-        });
+        );
         yield* Queue.offer(
           harness.sdkMessages,
           claudeSdkFrame({
@@ -6176,18 +6032,6 @@ const p=path.join(home,'runs','worker','meta.json'); const r=JSON.parse(fs.readF
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "turn terminal");
         const [terminal] = harness.terminalEvents();
         assert.equal(terminal?.status, "failed");
-        assert.isFalse(yield* harness.runtime.hasActiveTurn!);
-        assert.isFalse(accepted);
-        yield* harness.offerAndWait(
-          claudeSdkFrame({
-            type: "command_lifecycle",
-            command_uuid: harness.promptUuid(0),
-            state: "started",
-            uuid: "00000000-0000-4000-8000-000000000893",
-            session_id: WAKE_NATIVE_SESSION,
-          }),
-        );
-        assert.isFalse(accepted, "A late receipt cannot acknowledge a finished attempt.");
         if (terminal?.status !== "failed") return;
         assert.equal(terminal.threadDisposition, "reusable");
         assert.include(terminal.failure.message, "never started a turn");

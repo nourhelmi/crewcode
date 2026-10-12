@@ -1780,8 +1780,8 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
   );
 });
 
-it.layer(layerTest)("Crew native delegation invariants", (it) => {
-  it.effect("never upgrades Crew completion ownership to native wake delivery", () =>
+it.layer(layerTest)("delegation without app-owned completion wakes", (it) => {
+  it.effect("never upgrades disabled completion wakes to native delivery", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const now = yield* DateTime.now;
@@ -1809,81 +1809,6 @@ it.layer(layerTest)("Crew native delegation invariants", (it) => {
       const result = yield* orchestrator.getThreadProjection(threadId);
       assert.strictEqual(result.subagents[0]?.completionWake, "none");
       assert.strictEqual(result.subagents[0]?.completionDelivery?.state, "disposed");
-    }),
-  );
-  it.effect("isolates Crew native sessions and drops a racing redundant inbox wake", () =>
-    Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
-      const projects = yield* ProjectService.ProjectService;
-      const sink = yield* EventSink.EventSinkV2;
-      const now = yield* DateTime.now;
-      const projectId = ProjectId.make("crew-native-sessions");
-      yield* projects.create({
-        commandId: CommandId.make("crew-native-project"),
-        projectId,
-        title: "Crew sessions",
-        workspaceRoot: "/workspace/crew-native",
-      });
-      const sessionIds = [];
-      for (const suffix of ["one", "two"]) {
-        const threadId = ThreadId.make(`crew-native-${suffix}`);
-        yield* orchestrator.dispatch({
-          type: "thread.create",
-          commandId: CommandId.make(`crew-create-${suffix}`),
-          threadId,
-          projectId,
-          title: suffix,
-          modelSelection,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: null,
-          worktreePath: null,
-          createdBy: "agent",
-          creationSource: "mcp",
-        });
-        const fresh = yield* orchestrator.getThreadProjection(threadId);
-        yield* sink.write({
-          events: [
-            {
-              id: EventId.make(`crew-binding-${suffix}`),
-              type: "thread.metadata-updated",
-              threadId,
-              occurredAt: now,
-              payload: { ...fresh.thread, crew: { runId: suffix, home: "/isolated/crew" } },
-            },
-          ],
-        });
-        yield* orchestrator.dispatch({
-          type: "message.dispatch",
-          commandId: CommandId.make(`crew-initial-${suffix}`),
-          threadId,
-          messageId: MessageId.make(`crew-initial-${suffix}`),
-          text: "Initial Crew assignment",
-          attachments: [],
-          dispatchMode: { type: "start_immediately" },
-          createdBy: "agent",
-          creationSource: "mcp",
-        });
-        const active = yield* orchestrator.getThreadProjection(threadId);
-        sessionIds.push(active.providerThreads[0]?.providerSessionId);
-        const resume = yield* orchestrator.dispatch({
-          type: "message.dispatch",
-          commandId: CommandId.make(`crew-racing-resume-${suffix}`),
-          threadId,
-          messageId: MessageId.make(`crew-racing-resume-${suffix}`),
-          text: "Read unread inbox",
-          attachments: [],
-          dispatchMode: { type: "start_immediately" },
-          crewResume: true,
-          createdBy: "agent",
-          creationSource: "mcp",
-        });
-        assert.strictEqual(resume.storedEvents.length, 0);
-        assert.strictEqual((yield* orchestrator.getThreadProjection(threadId)).runs.length, 1);
-      }
-      assert.isString(sessionIds[0]);
-      assert.isString(sessionIds[1]);
-      assert.notStrictEqual(sessionIds[0], sessionIds[1]);
     }),
   );
 });

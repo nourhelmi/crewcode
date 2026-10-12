@@ -869,11 +869,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly adapter: ProviderAdapter.ProviderAdapterV2["Service"];
     readonly providerInstanceId: ProviderInstanceId;
     readonly threadId: ThreadId;
-    readonly isolated?: boolean;
   }) =>
     input.adapter.getCapabilities().pipe(
       Effect.flatMap((capabilities) =>
-        capabilities.sessions.supportsMultipleProviderThreadsPerSession && !input.isolated
+        capabilities.sessions.supportsMultipleProviderThreadsPerSession
           ? Effect.succeed(
               idAllocator.derive.providerSession({
                 providerInstanceId: input.providerInstanceId,
@@ -1622,7 +1621,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               adapter,
               providerInstanceId: queuedRun.providerInstanceId,
               threadId,
-              isolated: projection.thread.crew !== undefined,
             }),
           ),
           Effect.mapError(
@@ -4196,7 +4194,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               adapter: targetAdapter,
               providerInstanceId: input.modelSelection.instanceId,
               threadId: input.command.threadId,
-              isolated: input.projection.thread.crew !== undefined,
             }),
           ));
         const targetProviderThreadBase: OrchestrationV2ProviderThread =
@@ -4529,30 +4526,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) =>
     Effect.gen(function* () {
       let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
-      if (command.crewResume === true) {
-        if (
-          !projection.thread.crew ||
-          command.createdBy !== "agent" ||
-          command.creationSource !== "mcp" ||
-          command.dispatchMode.type !== "start_immediately"
-        ) {
-          return yield* new OrchestratorDispatchError({
-            commandId: command.commandId,
-            commandType: command.type,
-            cause: "Crew resume requires an owned native child and agent MCP provenance.",
-          });
-        }
-        // Decide against the serialized projection: a concurrent human follow-up
-        // already wakes this worker and its hooks consume the same unread inbox.
-        if (
-          projection.runs.some(isBlockingRun) ||
-          projection.runtimeRequests.some((request) => request.status === "pending") ||
-          projection.providerThreads.some(
-            (thread) => (thread.pendingBackgroundTasks?.length ?? 0) > 0,
-          )
-        )
-          return;
-      }
       if (command.manualContinuationOfRunId !== undefined) {
         const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
         const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -4737,7 +4710,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection,
         command.dispatchMode,
         command.deliveryIntent,
-        command.createdBy,
       );
       if (dispatchMode.type === "steer_active") {
         const targetRunId = dispatchMode.targetRunId;
@@ -5330,7 +5302,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               adapter,
               providerInstanceId: modelSelection.instanceId,
               threadId: command.threadId,
-              isolated: projection.thread.crew !== undefined,
             }),
           ));
         const providerThreadId =
@@ -5719,7 +5690,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             adapter,
             providerInstanceId: modelSelection.instanceId,
             threadId: command.threadId,
-            isolated: projection.thread.crew !== undefined,
           }),
         ));
       const existingProviderSession = projection.providerSessions.find(
@@ -6690,7 +6660,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
-        ...(command.crew === undefined ? {} : { crew: command.crew }),
       };
       const task: OrchestrationV2Subagent = {
         id: taskNodeId,
@@ -6707,11 +6676,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         prompt: command.task,
         title: command.title ?? null,
         model: command.modelSelection.model,
-        ...(command.crew !== undefined
-          ? { completionWake: "none" as const }
-          : command.completionWake === undefined
-            ? {}
-            : { completionWake: command.completionWake }),
+        ...(command.completionWake === undefined ? {} : { completionWake: command.completionWake }),
         status: "running",
         result: null,
         startedAt: now,
@@ -6939,11 +6904,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       modelSelection: run.modelSelection,
       prompt: command.text,
       title: child.title,
-      completionWake:
-        child.crew !== undefined || original.completionWake === "none" ? "none" : "always",
+      completionWake: original.completionWake === "none" ? "none" : "always",
       completionDelivery: {
-        state:
-          child.crew !== undefined || original.completionWake === "none" ? "disposed" : "pending",
+        state: original.completionWake === "none" ? "disposed" : "pending",
         observedByRunId: null,
       },
       status: run.status === "queued" ? "pending" : "running",
@@ -7066,7 +7029,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
         commandType: command.type,
-        cause: "Crew owns this task's completion delivery; its wake policy cannot be changed.",
+        cause: "This task has no app-owned completion delivery; its wake policy cannot be changed.",
       });
     if (task.completionWake === command.completionWake) {
       return yield* new OrchestratorDispatchError({
@@ -7684,13 +7647,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandId: command.commandId,
           commandType: command.type,
           cause: `Queued run ${queuedRun.id} is missing message or execution state.`,
-        });
-      }
-      if (projection.thread.crew !== undefined && queuedMessage.createdBy === "user") {
-        return yield* new OrchestratorDispatchError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause: "Crew worker follow-ups must remain queued until the worker is idle.",
         });
       }
       if (
@@ -11061,7 +11017,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         // its expected outcome, not a failure.
         planned.events.length > 0 ||
         command.type === "thread.background-work.settle" ||
-        (command.type === "message.dispatch" && command.crewResume === true) ||
         command.type === "thread.stop" ||
         command.type === "subagent.stop"
           ? Effect.succeed(planned)

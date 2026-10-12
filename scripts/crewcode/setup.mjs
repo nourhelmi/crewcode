@@ -3,9 +3,9 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
 import {
-  crewCodeProviderSettings,
-  migrateCrewCodeSettings,
-} from "../../apps/desktop/src/crewCodeBootstrap.ts";
+  crewAcpProviderSettings,
+  migrateCrewCodeToAcpSettings,
+} from "../../apps/desktop/src/crewAcpBootstrap.ts";
 
 export const repository = NodePath.resolve(
   NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
@@ -16,11 +16,10 @@ const providerInput = ({ home, crewBin }) => ({
   home,
   crewBin,
   executablePath: process.execPath,
-  adapterPath: NodePath.join(repository, "scripts/crewcode/acp.mjs"),
 });
 
 export function providerSettings(input) {
-  return crewCodeProviderSettings(providerInput(input));
+  return crewAcpProviderSettings(providerInput(input));
 }
 
 export async function setup({
@@ -51,9 +50,9 @@ export async function setup({
   const generated = providerSettings({ home, crewBin });
   await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
   if (contents !== undefined) {
-    const migrated = migrateCrewCodeSettings(contents, providerInput({ home, crewBin }));
+    const migrated = migrateCrewCodeToAcpSettings(contents, providerInput({ home, crewBin }));
     if (migrated) {
-      const temporaryPath = `${path}.native-migration`;
+      const temporaryPath = `${path}.acp-migration`;
       try {
         await NodeFSP.writeFile(temporaryPath, `${JSON.stringify(migrated, null, 2)}\n`, {
           flag: "wx",

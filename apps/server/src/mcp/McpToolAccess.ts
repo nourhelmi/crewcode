@@ -153,29 +153,6 @@ export const actsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A,
     ),
   );
 
-/** Crew retains workers across turns. Its service additionally verifies the current
- * MCP credential, exact native mailbox, and both Crew and T3 descendant ownership.
- * This exception does not authorize new delegation from an idle parent. */
-export const actsAsRetainedCrewCaller = <P, A, E, R>(
-  handle: (params: P) => Effect.Effect<A, E, R>,
-) =>
-  declare((params: P) =>
-    Effect.gen(function* () {
-      yield* requireThreadCaller;
-      yield* refuseReadOnlyClient;
-      const caller = yield* readCaller();
-      if (
-        caller.caller?.archivedAt !== null ||
-        caller.caller.providerInstanceId !== caller.scope.thread?.providerInstanceId
-      )
-        return yield* new OrchestratorMcpFailure({
-          code: "parent_not_active",
-          message: "The calling provider no longer owns this thread.",
-        });
-      return yield* handle(params).pipe(Effect.provideService(DispatchModeLimit, caller.limits));
-    }),
-  );
-
 /** Changes something that belongs to no thread, such as a pending upload or a scheduled task. */
 export const writes = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
   declare((params: P) => orchestratingCaller.pipe(Effect.flatMap(() => handle(params))));

@@ -1110,10 +1110,6 @@ export const WSL_RUNTIME_EXTRA_RESOURCES = [
 ] as const;
 export const DESKTOP_EXTRA_RESOURCES = [
   {
-    from: "apps/desktop/prod-resources/crewcode",
-    to: "crewcode",
-  },
-  {
     from: "apps/desktop/prod-resources/cursor-sdk",
     to: "node_modules/@cursor",
   },
@@ -2752,24 +2748,6 @@ export function resolveDesktopProductName(version: string): string {
     : (desktopPackageJson.productName ?? "CrewCode");
 }
 
-// Keep the ACP command outside asar: it runs in a separate Node process and
-// must remain usable after the source checkout is moved or removed.
-export const stageCrewCodeBridge = Effect.fn("stageCrewCodeBridge")(function* (input: {
-  readonly repoRoot: string;
-  readonly stageResourcesDir: string;
-}) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const destination = path.join(input.stageResourcesDir, "crewcode");
-  yield* fs.makeDirectory(destination, { recursive: true });
-  for (const file of ["acp.mjs", "crew-client.mjs"]) {
-    yield* fs.copyFile(
-      path.join(input.repoRoot, "scripts/crewcode", file),
-      path.join(destination, file),
-    );
-  }
-});
-
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   platform: typeof BuildPlatform.Type,
   target: string,
@@ -3757,7 +3735,6 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* Effect.log("[desktop-artifact] Staging release app...");
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
-  yield* stageCrewCodeBridge({ repoRoot, stageResourcesDir });
   if (options.platform === "linux") {
     const extensionDir = path.join(stageAppDir, "apps/desktop/gnome-extension");
     yield* fs.makeDirectory(extensionDir, { recursive: true });

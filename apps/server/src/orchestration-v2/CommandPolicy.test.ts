@@ -141,44 +141,6 @@ it("targets the latest active run for explicit steer and restart intent", () => 
   );
 });
 
-it.each([undefined, "auto", "steer", "restart"] as const)(
-  "queues human Crew follow-ups even with %s delivery intent while preserving ordinary steering",
-  (intent) => {
-    const projection = dispatchProjection(baseCapabilities);
-    const crew = {
-      ...projection,
-      thread: { ...projection.thread, crew: { runId: "worker", home: "/isolated" } },
-    };
-    assert.deepEqual(
-      CommandPolicy.resolveMessageDispatchIntent(
-        crew,
-        { type: "steer_active", targetRunId: activeRunId },
-        intent,
-        "user",
-      ),
-      { type: "queue_after_active" },
-    );
-    assert.deepEqual(
-      CommandPolicy.resolveMessageDispatchIntent(
-        crew,
-        { type: "steer_active", targetRunId: activeRunId },
-        "steer",
-        "agent",
-      ),
-      { type: "steer_active", targetRunId: activeRunId },
-    );
-    assert.deepEqual(
-      CommandPolicy.resolveMessageDispatchIntent(
-        { ...crew, runs: [] },
-        { type: "start_immediately" },
-        intent,
-        "user",
-      ),
-      { type: "start_immediately" },
-    );
-  },
-);
-
 const layer = it.layer(CommandPolicy.layer);
 
 layer("CommandPolicyV2", (it) => {

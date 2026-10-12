@@ -5,7 +5,6 @@ import * as Effect from "effect/Effect";
 import { readCaller } from "../../threadAccess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
-import * as CrewWorkerService from "../../CrewWorkerService.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
 
@@ -22,13 +21,6 @@ const handlers = {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.delegateTask(scope, input);
-    }),
-  ),
-  crew_worker: McpToolAccess.actsAsRetainedCrewCaller((input) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      const service = yield* CrewWorkerService.CrewWorkerService;
-      return yield* service.execute(scope, input);
     }),
   ),
   task_status: McpToolAccess.actsAsCaller(({ taskId }) =>

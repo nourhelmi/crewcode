@@ -4,6 +4,7 @@ import {
   normalizeDevinSessionUpdate,
   normalizeDevinToolCall,
   extractDevinSubagentUpdate,
+  makeCrewAcpRouting,
 } from "@t3tools/provider-acp-registry/testing";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeChildProcess from "node:child_process";
@@ -604,6 +605,313 @@ function makeTurnInput(input: {
 }
 
 describe("AcpAdapterV2", () => {
+  it.effect.each(["accept", "decline"] as const)(
+    "correlates Crew worker %s and question replies on the root ACP session",
+    (decision) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-crew-acp-wire-" });
+        const scriptPath = path.join(directory, "agent.mjs");
+        yield* fs.writeFileString(
+          scriptPath,
+          `
+import { createInterface } from 'node:readline';
+const send = value => process.stdout.write(JSON.stringify({jsonrpc:'2.0',...value})+'\\n');
+const result = (id,result) => send({id,result});
+const meta = {crew:{version:1,runId:'b-wire',childSessionId:'wire-child',role:'builder',model:'codex/luna',state:'running',managed:true,title:'Wire worker',task:'Check wire'}};
+const update = update => send({method:'session/update',params:{sessionId:'wire-root',update}});
+let promptId, choice;
+createInterface({input:process.stdin}).on('line',line => {
+ const message=JSON.parse(line);
+ if(message.method==='initialize') return result(message.id,{protocolVersion:1,agentInfo:{name:'crew',version:'1'},agentCapabilities:{_meta:{crew:{version:1}}},authMethods:[]});
+ if(message.method==='session/new') return result(message.id,{sessionId:'wire-root'});
+ if(message.method==='session/set_model'||message.method==='session/set_mode'||message.method==='session/close') return result(message.id,{});
+ if(message.method==='session/prompt') {
+  promptId=message.id;
+  update({sessionUpdate:'tool_call',toolCallId:'crew-worker:b-wire',title:'Wire worker',status:'in_progress',_meta:meta});
+  send({id:'permission-worker-exact',method:'session/request_permission',params:{sessionId:'wire-root',toolCall:{toolCallId:'b-wire:exec-1',title:'Wire worker: harmless command',kind:'execute',status:'pending',_meta:meta},options:[{optionId:'allow-this',name:'Allow',kind:'allow_once'},{optionId:'deny-this',name:'Decline',kind:'reject_once'}]}});
+ } else if(message.id==='permission-worker-exact') {
+  choice=message.result?.outcome?.optionId;
+  send({id:'question-worker-exact',method:'elicitation/create',params:{sessionId:'wire-root',mode:'form',message:'Worker color',requestedSchema:{type:'object',properties:{color:{type:'string',description:'Choose color',enum:['Blue','Green']}},required:['color']},_meta:meta}});
+ } else if(message.id==='question-worker-exact') {
+  update({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'choice='+choice+';color='+message.result?.content?.color},_meta:{crew:{...meta.crew,eventId:'wire-reply'}}});
+  update({sessionUpdate:'tool_call_update',toolCallId:'crew-worker:b-wire',status:'completed',_meta:{crew:{...meta.crew,state:'done'}}});
+  result(promptId,{stopReason:'end_turn'});
+ }
+});
+`,
+        );
+        const routing = makeCrewAcpRouting();
+        const instanceId = ProviderInstanceId.make(`crew-wire-${decision}`);
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          selfInvocation: yield* resolveSelfInvocation(),
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            ...routing,
+            makeRuntime: makeMockRuntime({
+              childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+              mockAgentPath: scriptPath,
+            }),
+          },
+        });
+        const threadId = ThreadId.make(`crew-wire-${decision}`);
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: directory,
+        });
+        const modelSelection = { instanceId, model: "default" };
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make(`crew-wire-session-${decision}`),
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* runtime.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+          }),
+        );
+        const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
+        yield* runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              seen.push(event);
+              if (
+                event.type !== "runtime_request.updated" ||
+                event.runtimeRequest.status !== "pending"
+              )
+                return;
+              assert.equal(event.threadId, threadId);
+              if (event.runtimeRequest.kind === "user_input")
+                yield* runtime.respondToRuntimeRequest({
+                  requestId: event.runtimeRequest.id,
+                  answers: { color: ["Blue"] },
+                });
+              else
+                yield* runtime.respondToRuntimeRequest({
+                  requestId: event.runtimeRequest.id,
+                  decision,
+                });
+            }),
+          ),
+        );
+        const messages = seen.flatMap((event) =>
+          event.type === "message.updated" ? [event.message] : [],
+        );
+        assert.isTrue(
+          messages.some(
+            (message) =>
+              message.threadId !== threadId &&
+              message.text ===
+                `choice=${decision === "accept" ? "allow-this" : "deny-this"};color=Blue`,
+          ),
+        );
+        assert.equal(
+          seen.filter(
+            (event) =>
+              event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+          ).length,
+          2,
+        );
+        assert.isTrue(
+          seen.some((event) => event.type === "turn.terminal" && event.status === "completed"),
+        );
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it.effect("projects Crew workers through read-only child threads across parent followups", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
+      let handler: Parameters<Runtime["handleSessionUpdate"]>[0] | undefined;
+      const routing = makeCrewAcpRouting();
+      const instanceId = ProviderInstanceId.make("crew-presentation");
+      let promptCount = 0;
+      const adapter = yield* makeAcpAdapterV2({
+        instanceId,
+        selfInvocation: yield* resolveSelfInvocation(),
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          ...routing,
+          makeRuntime: makeMockRuntime({
+            childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+            mockAgentPath: yield* path.fromFileUrl(
+              new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+            ),
+            wrapRuntime: (runtime) => ({
+              ...runtime,
+              start: () =>
+                runtime.start().pipe(
+                  Effect.tap(() =>
+                    routing.onInitialized({
+                      protocolVersion: 1,
+                      agentInfo: { name: "crew", version: "1" },
+                      agentCapabilities: { _meta: { crew: { version: 1 } } },
+                    }),
+                  ),
+                ),
+              handleSessionUpdate: (next) =>
+                Effect.sync(() => {
+                  handler = next;
+                }).pipe(Effect.andThen(runtime.handleSessionUpdate(next))),
+              prompt: (payload) =>
+                Effect.gen(function* () {
+                  assert.deepEqual(payload.prompt[0], { type: "text", text: "Lead this work" });
+                  promptCount++;
+                  if (handler === undefined) return yield* Effect.die("No session handler");
+                  const meta = {
+                    runId: "b-worker",
+                    childSessionId: "worker-session",
+                    model: "codex/luna",
+                    role: "builder",
+                    title: "Parser",
+                    task: "Check parser",
+                    managed: true,
+                  };
+                  const lifecycle = (state: string) =>
+                    handler!({
+                      sessionId: "mock-session-1",
+                      update: {
+                        sessionUpdate: "tool_call",
+                        toolCallId: "crew-worker:b-worker",
+                        title: "Parser",
+                        status: state === "done" ? "completed" : "in_progress",
+                        _meta: { crew: { ...meta, state } },
+                      },
+                    });
+                  yield* lifecycle("running");
+                  yield* handler({
+                    sessionId: "mock-session-1",
+                    update: {
+                      sessionUpdate: "agent_message_chunk",
+                      content: { type: "text", text: `worker ${promptCount}` },
+                      _meta: {
+                        crew: { ...meta, state: "running", eventId: `reply-${promptCount}` },
+                      },
+                    },
+                  });
+                  yield* handler({
+                    sessionId: "mock-session-1",
+                    update: {
+                      sessionUpdate: "tool_call",
+                      toolCallId: `b-worker:tool-${promptCount}`,
+                      title: "Read parser",
+                      kind: "read",
+                      status: "completed",
+                      rawOutput: "parser contents",
+                      _meta: { crew: { ...meta, state: "running" } },
+                    },
+                  });
+                  yield* lifecycle("done");
+                  // Crew retained assignments can reopen within the same prompt.
+                  yield* lifecycle("running");
+                  yield* lifecycle("done");
+                  yield* handler({
+                    sessionId: "mock-session-1",
+                    update: {
+                      sessionUpdate: "agent_message_chunk",
+                      content: { type: "text", text: `lead ${promptCount}` },
+                    },
+                  });
+                  return { stopReason: "end_turn" as const };
+                }),
+            }),
+          }),
+        },
+      });
+      const threadId = ThreadId.make("thread-crew-presentation");
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const modelSelection = { instanceId, model: "default" };
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("crew-presentation-session"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const children = new Set<string>();
+      for (const ordinal of [1, 2]) {
+        yield* runtime.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal,
+            messageText: "Lead this work",
+          }),
+        );
+        const events = Array.from(
+          yield* runtime.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          ),
+        );
+        for (const event of events)
+          if (event.type === "app_thread.created") {
+            assert.equal(event.appThread.creationSource, "provider");
+            assert.equal(event.appThread.lineage.parentThreadId, threadId);
+            children.add(event.appThread.id);
+          }
+        const messages = events.flatMap((event) =>
+          event.type === "message.updated" ? [event.message] : [],
+        );
+        assert.isTrue(
+          messages.some(
+            (message) =>
+              message.threadId !== threadId &&
+              message.text === `worker ${ordinal}` &&
+              message.runId === null,
+          ),
+          JSON.stringify(events),
+        );
+        assert.isTrue(
+          messages.some(
+            (message) => message.threadId === threadId && message.text === `lead ${ordinal}`,
+          ),
+        );
+        const tasks = events.flatMap((event) =>
+          event.type === "subagent.updated" ? [event.subagent.status] : [],
+        );
+        assert.deepEqual(tasks, ["running", "completed", "running", "completed"]);
+        assert.isTrue(
+          events.some(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.threadId !== threadId &&
+              event.turnItem.type === "dynamic_tool" &&
+              event.turnItem.status === "completed",
+          ),
+        );
+      }
+      assert.equal(children.size, 1);
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it.live.each(["failed", "recovered", "completed", "cancelled"] as const)(
     "projects Mistral retry notices and their %s outcome",
     (outcome) =>

@@ -1,9 +1,3 @@
-import {
-  crewProcessEnvironment,
-  crewThreadEnvironment,
-} from "../../provider/CrewNativeEnvironment.ts";
-import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
-import * as CrewNativeRuntime from "../../provider/CrewNativeRuntime.ts";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -1309,7 +1303,6 @@ export const CODEX_THREAD_CONFIG = { "tools.update_plan.enabled": true } as cons
 export function codexThreadRuntimeParams(input: {
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
   readonly modelSelection?: { readonly model: string };
-  readonly crewEnvironment?: Readonly<Record<string, string>>;
   readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
 }): {
   readonly cwd?: string;
@@ -1322,9 +1315,6 @@ export function codexThreadRuntimeParams(input: {
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
-      ...(input.crewEnvironment === undefined || Object.keys(input.crewEnvironment).length === 0
-        ? {}
-        : { "shell_environment_policy.set": input.crewEnvironment }),
       ...(mcpSession === undefined
         ? {}
         : {
@@ -1569,7 +1559,6 @@ export const layerAppServerClientFactory: Layer.Layer<
 );
 
 export type CodexAdapterV2DriverEnv =
-  | ChildProcessSpawner.ChildProcessSpawner
   | CodexAppServerClientFactory
   | Crypto.Crypto
   | FileSystem.FileSystem
@@ -1635,8 +1624,6 @@ export const CodexAdapterV2Driver: ProviderAdapterDriver<CodexSettings, CodexAda
 const layer: Layer.Layer<
   ProviderAdapter.ProviderAdapterV2,
   never,
-  | ChildProcessSpawner.ChildProcessSpawner
-  | Path.Path
   | CodexAppServerClientFactory
   | Crypto.Crypto
   | FileSystem.FileSystem
@@ -1703,9 +1690,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   const readMcpSession = (threadId: ThreadId | null) =>
     threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
-  const crewSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const crewPath = yield* Path.Path;
-  const crewInvocation = yield* resolveSelfInvocation();
   const continuationRequests = adapterOptions.continuationRequests;
 
   return ProviderAdapter.ProviderAdapterV2.of({
@@ -1729,27 +1713,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     }),
                 ),
               );
-        const sessionEnvironment = crewProcessEnvironment(
-          resolvedRuntime?.environment ?? adapterOptions.environment,
-          input.runtimePolicy.crew,
-        );
-        const crewEnvironmentFor = (
-          mcpSession: McpProviderSession.McpProviderSessionConfig | undefined,
-          runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy | undefined,
-        ) =>
-          crewThreadEnvironment({
-            environment: sessionEnvironment,
-            crew: runtimePolicy?.crew,
-            mcpSession,
-            invocation: crewInvocation,
-          });
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
           providerSessionId: input.providerSessionId,
           runtimePolicy: input.runtimePolicy,
           settings: resolvedRuntime?.config ?? adapterOptions.settings,
-          environment: sessionEnvironment,
+          environment: resolvedRuntime?.environment ?? adapterOptions.environment,
         });
         const additionalContextByThread = yield* Ref.make(
           new Map<
@@ -1933,37 +1903,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
         const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
           Queue.offer(events, event).pipe(Effect.asVoid);
-        const crew = yield* CrewNativeRuntime.make({
-          host: "codex",
-          driver: CODEX_PROVIDER,
-          environment: sessionEnvironment,
-          emit: emitProviderEvent,
-        }).pipe(
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, crewSpawner),
-          Effect.provideService(Path.Path, crewPath),
-        );
-        yield* Effect.addFinalizer(() =>
-          Effect.gen(function* () {
-            if (!crew.enabled) return;
-            for (const context of (yield* Ref.get(activeTurns)).values()) {
-              if (context.subagent !== null) continue;
-              const nativeThreadId = context.providerThread.nativeThreadRef?.nativeId;
-              if (nativeThreadId)
-                yield* client
-                  .request("turn/interrupt", {
-                    threadId: nativeThreadId,
-                    turnId: context.nativeTurnId,
-                  })
-                  .pipe(Effect.ignore);
-            }
-            yield* crew.close.pipe(
-              Effect.catch(() =>
-                Effect.logWarning("crew-native-cleanup-failed", { driver: CODEX_PROVIDER }),
-              ),
-            );
-          }),
-        );
 
         /** Writes the thread's current native goal onto its root provider thread. */
         const emitGoalUpdate = Effect.fnUntraced(function* (nativeThreadId: string) {
@@ -2095,14 +2034,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               },
             });
             yield* rememberRootProviderThread(input.turnInput.providerThread);
-            const nativeThreadId = context.providerThread.nativeThreadRef?.nativeId;
-            if (nativeThreadId)
-              yield* crew.observe({
-                nativeThreadId,
-                input: input.turnInput,
-                providerTurnId,
-                ordinal: (id) => resolveItemOrdinal(context, id),
-              });
             return context;
           });
 
@@ -5796,13 +5727,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               if (current !== input.context) {
                 return false;
               }
-              const crewThreadId = input.context.providerThread.nativeThreadRef?.nativeId;
-              if (input.context.subagent === null && crewThreadId)
-                yield* crew.finish(
-                  crewThreadId,
-                  input.context.providerTurnId,
-                  input.status !== "completed",
-                );
               const providerRetry = yield* Ref.modify(providerRetries, (current) => {
                 const retry = current.get(input.context.providerTurnId);
                 if (retry === undefined) {
@@ -6254,13 +6178,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           );
         });
 
-        const acknowledgePrompt = (accepted: Effect.Effect<void> | undefined) =>
-          (accepted ?? Effect.void).pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("orchestration-v2.prompt-acknowledgement-failed", { cause }),
-            ),
-          );
-
         /** Starts a native turn with this run's full turn configuration. */
         const startNativeTurn = (
           turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
@@ -6503,10 +6420,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           // (not pending) between turns, so idle release can win the race
           // against a long-delayed resume. Codex emits no resume-expected
           // signal to pin on.
-          hasActiveTurn: Ref.get(activeTurns).pipe(Effect.map((turns) => turns.size > 0)),
           hasPendingBackgroundWork: Effect.gen(function* () {
-            yield* crew.refresh;
-            if (yield* crew.pending()) return true;
             for (const items of (yield* Ref.get(runningCommandItemsByTurn)).values()) {
               if (items.size > 0) {
                 return true;
@@ -6529,9 +6443,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           }),
           hasPendingBackgroundWorkForThread: (providerThread) =>
             Effect.gen(function* () {
-              yield* crew.refresh;
-              const crewThreadId = providerThread.nativeThreadRef?.nativeId;
-              if (crewThreadId && (yield* crew.pending(crewThreadId))) return true;
               const contexts = [
                 ...(yield* Ref.get(activeTurns)).values(),
                 ...(yield* Ref.get(settledTurns)).values(),
@@ -6559,7 +6470,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   "thread/start",
                   codexThreadRuntimeParams({
                     mcpSession,
-                    crewEnvironment: crewEnvironmentFor(mcpSession, threadInput.runtimePolicy),
                     modelSelection: threadInput.modelSelection,
                     runtimePolicy: threadInput.runtimePolicy,
                   }),
@@ -6588,15 +6498,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
               // excludeTurns is not in the generated request schema yet.
-              const mcpSession = yield* readMcpSession(
-                threadInput.threadId ?? threadInput.providerThread.appThreadId,
-              );
               const resume = client.raw.request("thread/resume", {
                 threadId: nativeThreadId,
                 excludeTurns: true,
                 ...codexThreadRuntimeParams({
-                  mcpSession,
-                  crewEnvironment: crewEnvironmentFor(mcpSession, threadInput.runtimePolicy),
+                  mcpSession: yield* readMcpSession(
+                    threadInput.threadId ?? threadInput.providerThread.appThreadId,
+                  ),
                   ...(threadInput.modelSelection === undefined
                     ? {}
                     : { modelSelection: threadInput.modelSelection }),
@@ -6716,10 +6624,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               turnInput.restartContinuationOfRunId === undefined
                 ? parseCodexGoalCommand(turnInput.message.text)
                 : null;
-            if (goalCommand !== null)
-              return runGoalCommand(turnInput, goalCommand).pipe(
-                Effect.andThen(acknowledgePrompt(turnInput.onPromptAccepted)),
-              );
+            if (goalCommand !== null) return runGoalCommand(turnInput, goalCommand);
             return Effect.gen(function* () {
               yield* startNativeTurn(
                 turnInput,
@@ -6727,7 +6632,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   ? yield* toCodexInput(turnInput)
                   : [],
               );
-              yield* acknowledgePrompt(turnInput.onPromptAccepted);
             }).pipe(
               Effect.mapError(
                 (cause) =>
@@ -6766,7 +6670,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 input: codexInput,
                 threadId,
               });
-              yield* acknowledgePrompt(turnInput.onPromptAccepted);
             }).pipe(
               Effect.mapError(
                 (cause) =>
@@ -6784,7 +6687,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           unloadThread: (unloadInput) =>
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(unloadInput.providerThread);
-              if (unloadInput.reason === "terminal") yield* crew.stop(nativeThreadId);
               yield* client.request("thread/unsubscribe", { threadId: nativeThreadId });
             }).pipe(
               Effect.mapError((cause) =>
@@ -7175,10 +7077,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 Effect.ensuring(cleanupInterruptState),
               );
             }).pipe(
-              Effect.tap(() => {
-                const nativeThreadId = requestedInput.providerThread.nativeThreadRef?.nativeId;
-                return nativeThreadId ? crew.stop(nativeThreadId) : Effect.void;
-              }),
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterInterruptError({
@@ -7330,13 +7228,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               // process. After a restart or idle release, load it the same way
               // the next turn would before reverting.
               if (!loaded) {
-                const mcpSession = yield* readMcpSession(threadInput.providerThread.appThreadId);
                 yield* client.raw.request("thread/resume", {
                   threadId,
                   excludeTurns: true,
                   ...codexThreadRuntimeParams({
-                    mcpSession,
-                    crewEnvironment: crewEnvironmentFor(mcpSession, input.runtimePolicy),
+                    mcpSession: yield* readMcpSession(threadInput.providerThread.appThreadId),
                     modelSelection: input.modelSelection,
                     runtimePolicy: input.runtimePolicy,
                   }),
@@ -7377,7 +7273,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             Effect.gen(function* () {
               const threadId = yield* getNativeThreadId(threadInput.sourceProviderThread);
               const boundary = yield* resolveCodexForkBoundary(threadInput);
-              const mcpSession = yield* mcpSessions.read(threadInput.targetThreadId);
               const response = yield* ensureInitialized.pipe(
                 Effect.andThen(
                   client.request("thread/fork", {
@@ -7386,8 +7281,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                       ? {}
                       : { lastTurnId: boundary.lastTurnId }),
                     ...codexThreadRuntimeParams({
-                      mcpSession,
-                      crewEnvironment: crewEnvironmentFor(mcpSession, threadInput.runtimePolicy),
+                      mcpSession: yield* mcpSessions.read(threadInput.targetThreadId),
                       ...(threadInput.modelSelection === undefined
                         ? {}
                         : { modelSelection: threadInput.modelSelection }),

@@ -110,24 +110,6 @@ const layerTest = RuntimePolicy.layerFromProjectStore.pipe(
 );
 
 it.layer(layerTest)("RuntimePolicyV2", (it) => {
-  it.effect("preserves the exact Crew worker binding for native process hooks", () =>
-    Effect.gen(function* () {
-      const policy = yield* RuntimePolicy.RuntimePolicyV2;
-      const now = yield* DateTime.now;
-      const crew = { runId: "worker-a", home: "/private/crew", rosterPath: "/private/roster" };
-      const resolved = yield* policy.resolve({
-        thread: { ...makeThread({ now, worktreePath: null }), crew },
-        modelSelection,
-      });
-      assert.deepEqual(resolved.crew, crew);
-      const root = yield* policy.resolve({
-        thread: makeThread({ now, worktreePath: null }),
-        modelSelection,
-      });
-      assert.equal(root.crew, undefined);
-    }),
-  );
-
   it.effect("uses the project root for local-checkout threads", () =>
     Effect.gen(function* () {
       const policy = yield* RuntimePolicy.RuntimePolicyV2;

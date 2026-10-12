@@ -3,6 +3,7 @@ import {
   normalizeDevinToolCall,
   extractDevinSubagentUpdate,
 } from "./devinAcp.ts";
+import { makeCrewAcpRouting } from "./crewAcp.ts";
 import {
   copilotClientCapabilitiesMeta,
   extractCopilotSubagentUpdate,
@@ -193,7 +194,12 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
     (options.settings.source === "local" &&
       /^copilot(\.exe|\.cmd)?$/i.test(options.settings.commandPath.split(/[\\/]/).pop() ?? ""));
   const copilotRouting = isCopilot ? makeCopilotSubagentRouting() : undefined;
+  const crewRouting = makeCrewAcpRouting();
   const flavor: AcpAdapterV2Flavor = {
+    onInitialized: crewRouting.onInitialized,
+    ownsWorkflow: crewRouting.ownsWorkflow,
+    normalizeSessionUpdate: crewRouting.normalizeSessionUpdate,
+    extractSubagentUpdate: crewRouting.extractSubagentUpdate,
     driver: ACP_REGISTRY_PROVIDER,
     capabilities: AcpProviderCapabilitiesV2,
     promptFailure: (cause) => acpRegistryPromptFailure(registryAgentId, cause),

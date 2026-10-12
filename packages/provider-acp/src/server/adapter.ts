@@ -132,6 +132,7 @@ const ACP_DEFERRED_FINALIZE_DEBOUNCE: Duration.Input = "3000 millis";
 
 export interface AcpAdapterV2RuntimeInput {
   readonly cwd: string;
+  readonly onInitialized?: NonNullable<AcpSessionRuntime.AcpSessionRuntimeOptions["onInitialized"]>;
   /**
    * Policy the session opened with. A runtime-mode change reopens the session,
    * so flavors that encode permissions in the launch command (Grok) read it here.
@@ -214,6 +215,9 @@ export interface AcpAdapterV2ExtensionContext {
 }
 
 export interface AcpAdapterV2Flavor {
+  readonly onInitialized?: NonNullable<AcpSessionRuntime.AcpSessionRuntimeOptions["onInitialized"]>;
+  /** A negotiated orchestrating agent supplies its own workflow instructions. */
+  readonly ownsWorkflow?: () => boolean;
   /** Interprets provider-specific prompt errors before they cross into orchestration. */
   readonly promptFailure?: (cause: unknown) => OrchestrationV2ProviderFailure;
   readonly driver: ProviderDriverKind;
@@ -459,6 +463,8 @@ export function acpProviderItemNativeId(input: {
 }
 
 export interface AcpAdapterV2SubagentUpdate {
+  /** Retained workers may begin another assignment within the same root prompt. */
+  readonly allowReopen?: boolean;
   readonly nativeTaskId: string;
   readonly prompt: string;
   readonly title: string | null;
@@ -2108,6 +2114,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         ): AcpAdapterV2RuntimeInput => {
           return {
             cwd: input.runtimePolicy.cwd ?? process.cwd(),
+            ...(flavor.onInitialized === undefined ? {} : { onInitialized: flavor.onInitialized }),
             runtimePolicy: input.runtimePolicy,
             mcpServers: mcpContext.servers,
             acpMcpServers: mcpContext.acpServers,
@@ -2705,7 +2712,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           if (
             existing !== undefined &&
             acpSubagentStatusIsTerminal(existing.task.status) &&
-            !updateIsTerminal
+            !updateIsTerminal &&
+            update.allowReopen !== true
           ) {
             return;
           }
@@ -6797,13 +6805,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             attachments: turnInput.message.attachments,
             resolveAttachmentPath: host.resolveAttachmentPath,
           });
-          const text = t3AcpPromptWithInstructions({
-            prompt: messageText,
-            state: instructionState,
-            ...(previousInstructionState === undefined
-              ? {}
-              : { previousState: previousInstructionState }),
-          });
+          const text =
+            flavor.ownsWorkflow?.() === true
+              ? messageText
+              : t3AcpPromptWithInstructions({
+                  prompt: messageText,
+                  state: instructionState,
+                  ...(previousInstructionState === undefined
+                    ? {}
+                    : { previousState: previousInstructionState }),
+                });
           if (text.length > 0) {
             prompt.push({ type: "text", text });
           }

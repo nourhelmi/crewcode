@@ -179,7 +179,7 @@ export interface ProviderSessionManagerV2Shape {
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
   readonly release: (input: {
     readonly providerSessionId: ProviderSessionId;
-    /** Crew retirement requires proof of process scope closure, including prior timed-out releases. */
+    /** Require proof of process scope closure, including prior timed-out releases. */
     readonly requireClosed?: boolean;
     readonly reason: ProviderSessionReleaseReason;
     readonly detail?: string;

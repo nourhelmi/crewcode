@@ -1,4 +1,3 @@
-import * as CrewNativeControl from "../provider/CrewNativeControl.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
@@ -164,19 +163,12 @@ const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pip
       layerProviderAuthServiceProvided,
       layerRunExecutionServiceProvided,
       layerRuntimePolicyProvided,
-      CrewNativeControl.layer,
     ),
   ),
 );
 
 const layerProviderTurnControlServiceProvided = ProviderTurnControlService.layer.pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      ProjectionStore.layer,
-      layerProviderSessionManagerProvided,
-      CrewNativeControl.layer,
-    ),
-  ),
+  Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
 );
 const layerRuntimeRequestServiceProvided = RuntimeRequestService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
@@ -248,7 +240,6 @@ const layerAgentSessionImporterProvided = AgentSessionImporter.layer.pipe(
 );
 
 const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImporter.pipe(
-  Layer.provide(CrewNativeControl.layer),
   Layer.provide(
     Layer.mergeAll(
       layerOrchestratorProvided,

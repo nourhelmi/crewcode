@@ -1,8 +1,8 @@
 # CrewCode
 
-T3 Code's native agent workspace with [Crew](https://github.com/nourhelmi/crew) delegation. Choose Codex or Claude and the lead's model, then invoke Crew's advisor or cos skill in that conversation. Crew routes delegated workers while T3 keeps the lead's streaming, tools, approvals, projects, diffs, terminals, and checkpoints.
+T3 Code's desktop workspace with [Crew](https://github.com/nourhelmi/crew) as a generic ACP agent. Choose **Crew**, a lead model from your roster, and **Advisor** or **Chief of staff**. You talk only to that root; Crew owns delegation and worker mail. The optional client adapter shows workers as read-only child conversations.
 
-Open **CrewCode.app** from Applications, add a project, and choose a native provider and model. The desktop app starts its own local server; no browser or separate server command is required. Install Crew's skills and hooks alongside your authenticated host CLIs. The optional **Crew · automatic routing** ACP provider remains available for automatically routed conversations.
+Open **CrewCode.app** from Applications and add a project. The app starts its own local server; no browser or separate server command is required. Keep Crew and the native CLIs authenticated separately. Native Codex and Claude providers remain available for ordinary chats. Stock T3 can also run `crew acp`; this fork adds the Crew child-view presentation.
 
 To build the unsigned macOS app from this checkout:
 

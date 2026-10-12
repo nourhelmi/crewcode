@@ -1,5 +1,4 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
-import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
 
@@ -65,7 +64,6 @@ import {
   resolveMockUpdateServerPort,
   resolveMockUpdateServerUrl,
   resolvePackageManagerUserAgent,
-  stageCrewCodeBridge,
   stageLinuxIconSize,
   stageDesktopDmgBackground,
   stageResourceMonitor,
@@ -408,10 +406,9 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(config.appId, "com.nourhelmi.crewcode");
       assert.equal(config.productName, "CrewCode");
       assert.include(config.extraResources as unknown[], DESKTOP_EXTRA_RESOURCES[0]);
-      assert.deepStrictEqual(DESKTOP_EXTRA_RESOURCES[0], {
-        from: "apps/desktop/prod-resources/crewcode",
-        to: "crewcode",
-      });
+      assert.isFalse(
+        DESKTOP_EXTRA_RESOURCES.some((resource) => String(resource.to) === "crewcode"),
+      );
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(
@@ -420,41 +417,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           }),
         ),
       ),
-    ),
-  );
-
-  it.effect("runs the staged Crew bridge without the source checkout or dependencies", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const stageResourcesDir = yield* fs
-          .makeTempDirectoryScoped({ prefix: "crewcode-bridge-" })
-          .pipe(Effect.flatMap(fs.realPath));
-        const repoRoot = yield* path.fromFileUrl(new URL("..", import.meta.url));
-        yield* stageCrewCodeBridge({ repoRoot, stageResourcesDir });
-        const output = NodeChildProcess.execFileSync(
-          process.execPath,
-          [path.join(stageResourcesDir, "crewcode/acp.mjs")],
-          {
-            cwd: stageResourcesDir,
-            env: { ...process.env, CREWCODE_HOME: path.join(stageResourcesDir, "state") },
-            input:
-              JSON.stringify({
-                jsonrpc: "2.0",
-                id: 1,
-                method: "initialize",
-                params: { protocolVersion: 1 },
-              }) + "\n",
-            encoding: "utf8",
-            timeout: 10_000,
-          },
-        );
-        const reply = JSON.parse(output);
-        assert.equal(reply.id, 1);
-        assert.equal(reply.result.agentInfo.name, "crewcode");
-        assert.equal(reply.result.protocolVersion, 1);
-      }),
     ),
   );
 
@@ -2262,10 +2224,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("stages the resource monitor as an external executable resource", () => {
     assert.deepStrictEqual(DESKTOP_EXTRA_RESOURCES, [
-      {
-        from: "apps/desktop/prod-resources/crewcode",
-        to: "crewcode",
-      },
       {
         from: "apps/desktop/prod-resources/cursor-sdk",
         to: "node_modules/@cursor",
