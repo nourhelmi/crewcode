@@ -6,7 +6,7 @@ You talk to your **root advisor or CoS**. Workers are read-only child views: ins
 
 ## Desktop use
 
-Open `CrewCode.app`, add a project, choose **Crew**, select a lead model, and select **Advisor** or **Chief of staff** before your first message. The model list comes from your enabled Crew roster entries whose native CLI is installed. Choose your Astra or Opus entry when it is configured and available to your account. Advisor and CoS choose the workflow; they do not choose the lead model.
+Open `CrewCode.app`, add a project, choose **Crew**, select a lead model, and select **Advisor** or **Chief of staff** before your first message. The model list combines your enabled Crew roster entries with optional `leadModels` in `~/.config/crew/config.json`, for models whose native CLI is installed. For example, `"leadModels": ["codex/gpt-6-astra@medium"]` exposes Astra for manual root selection without adding it to worker routing. Choose your Astra or Opus entry when it is configured and available to your account. Advisor and CoS choose the workflow; they do not choose the lead model.
 
 **Default** resolves to the session's selected roster model. The obsolete `crew-auto` bridge model is no longer used. Worker models still follow Crew's roster/router and explicit pins. View the roster with `crew roster`.
 
